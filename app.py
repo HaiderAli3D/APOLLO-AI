@@ -14,6 +14,8 @@ import shutil
 import time
 import re
 import subprocess
+import glob
+from pathlib import Path
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from functools import wraps
@@ -67,6 +69,17 @@ for main_topic_code, main_topic_data in OCR_CS_DETAILED_TOPICS.items():
 # Initialize Flask application
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "ocr_cs_tutor_secret_key")  # Change in production
+
+# Setup automatic cleanup function for temp files
+def setup_automatic_cleanup():
+    """Setup automatic cleanup of temporary LaTeX files"""
+    try:
+        # Perform an initial cleanup on startup
+        from latex_compiler import cleanup_temp_latex_files
+        cleanup_temp_latex_files()
+        print("Initial cleanup of temporary LaTeX files completed on startup")
+    except Exception as e:
+        print(f"Error during initial cleanup: {e}")
 
 # Initialize resource manager and database
 # We'll create these per request to avoid thread safety issues with SQLite
@@ -188,8 +201,20 @@ def cleanup_old_pdfs(user_id):
     conn.commit()
     conn.close()
 
+def cleanup_temp_latex_files():
+    """
+    Clean up orphaned temporary LaTeX files.
+    This function is now a wrapper that calls the implementation in latex_compiler.py
+    """
+    from latex_compiler import cleanup_temp_latex_files as cleanup_impl
+    cleanup_impl()
+
 def add_pdf_to_database(user_id, topic_code, topic_title, filename):
-    """Add a new PDF record to the database."""
+    """
+    DEPRECATED: Use the generated_pdfs table instead.
+    Legacy function for backward compatibility.
+    """
+    print("Warning: Using deprecated add_pdf_to_database function. Use generated_pdfs table instead.")
     conn = sqlite3.connect('user_database.db')
     cursor = conn.cursor()
     
@@ -667,6 +692,10 @@ IMPORTANT NOTES:
 - When I request the exam, respond ONLY with LaTeX code as per the instructions above. 
 - If I ask for marking or clarification after submitting my answers, you may then respond in normal English.
 
+ONLY RESPOND WITH LATEX CODE NOTHING ELSE
+YOUR FIRST LINE SHOULD BE \documentclass
+ONLY RESPOND WITH LATEX
+
 """
 
     else:
@@ -723,6 +752,8 @@ def migrate_database():
 with app.app_context():
     initialize_db()
     migrate_database()
+    # Run initial cleanup at startup
+    setup_automatic_cleanup()
 
 @app.route('/')
 def index():
@@ -827,6 +858,15 @@ def admin_resources():
     rm = get_resource_manager()
     files = rm.get_all_file_info()
     return render_template('admin/resources.html', files=files)
+
+@app.route('/admin/maintenance/cleanup-temp-files')
+@admin_required
+def admin_cleanup_temp_files():
+    """Admin route to manually clean up temporary LaTeX files."""
+    # Run the cleanup function
+    cleanup_temp_latex_files()
+    flash('Temporary LaTeX files cleanup completed', 'success')
+    return redirect(url_for('admin_dashboard'))
 
 @app.route('/admin/upload', methods=['GET', 'POST'])
 @admin_required
@@ -1098,22 +1138,40 @@ def generate_student_chat_stream(question, conversation_history, topic_code=None
     """Generate streaming response for topic-specific student chat."""
     client = get_anthropic_client()
     
-    # Get streaming response
-    response_stream = get_claude_response(question, conversation_history, topic_code, stream=True, mode=mode)
-    
-    # Track full response for conversation history
-    full_response = ""
-    
-    # Stream each chunk as it comes
-    for chunk in response_stream:
-        if chunk.type == "content_block_delta":
-            text = chunk.delta.text
-            if text:  # Only send non-empty text
-                full_response += text
-                yield f"data: {json.dumps({'text': text})}\n\n"
-    
-    # Send the final response with the complete content
-    yield f"data: {json.dumps({'done': True, 'full_response': full_response})}\n\n"
+    try:
+        # Get streaming response
+        response_stream = get_claude_response(question, conversation_history, topic_code, stream=True, mode=mode)
+        
+        # Track full response for conversation history
+        full_response = ""
+        
+        # Stream each chunk as it comes
+        for chunk in response_stream:
+            # Handle different response formats from Anthropic API
+            if hasattr(chunk, 'type') and chunk.type == "content_block_delta":
+                # New API format
+                text = chunk.delta.text
+                if text:  # Only send non-empty text
+                    full_response += text
+                    yield f"data: {json.dumps({'text': text})}\n\n"
+            elif isinstance(chunk, dict) and 'completion' in chunk:
+                # Old API format (for backward compatibility)
+                text = chunk.get('completion', '')
+                if text:
+                    full_response += text
+                    yield f"data: {json.dumps({'text': text})}\n\n"
+            elif isinstance(chunk, str):
+                # Simple string response (fallback)
+                full_response += chunk
+                yield f"data: {json.dumps({'text': chunk})}\n\n"
+        
+        # Send the final response with the complete content
+        yield f"data: {json.dumps({'done': True, 'full_response': full_response})}\n\n"
+    except Exception as e:
+        # Log the error for debugging
+        print(f"Error in streaming response: {str(e)}")
+        # Send an error message to the client
+        yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
 @app.route('/student/chat', methods=['POST', 'GET'])
 @login_required
@@ -1224,23 +1282,39 @@ def student_chat():
                 
                 # Function to generate SSE data
                 def generate():
-                    nonlocal current_session_id
-                    # Get streaming response
-                    response_stream = get_claude_response(question, conversation_history, topic_code, stream=True, mode=mode)
-                    
-                    # Track full response for database
-                    full_response = ""
-                    
-                    # Stream each chunk as it comes
-                    for chunk in response_stream:
-                        if chunk.type == "content_block_delta":
-                            text = chunk.delta.text
-                            if text:  # Only send non-empty text
-                                full_response += text
-                                yield f"data: {json.dumps({'text': text})}\n\n"
-                    
-                    # Signal the end of the stream with the full response
-                    yield f"data: {json.dumps({'done': True, 'full_response': full_response})}\n\n"
+                    try:
+                        nonlocal current_session_id
+                        # Get streaming response
+                        response_stream = get_claude_response(question, conversation_history, topic_code, stream=True, mode=mode)
+                        
+                        # Track full response for database
+                        full_response = ""
+                        
+                        # Stream each chunk as it comes
+                        for chunk in response_stream:
+                            # Handle different response formats from Anthropic API
+                            if hasattr(chunk, 'type') and chunk.type == "content_block_delta":
+                                # New API format
+                                text = chunk.delta.text
+                                if text:  # Only send non-empty text
+                                    full_response += text
+                                    yield f"data: {json.dumps({'text': text})}\n\n"
+                            elif isinstance(chunk, dict) and 'completion' in chunk:
+                                # Old API format (for backward compatibility)
+                                text = chunk.get('completion', '')
+                                if text:
+                                    full_response += text
+                                    yield f"data: {json.dumps({'text': text})}\n\n"
+                            elif isinstance(chunk, str):
+                                # Simple string response (fallback)
+                                full_response += chunk
+                                yield f"data: {json.dumps({'text': chunk})}\n\n"
+                        
+                        # Signal the end of the stream with the full response
+                        yield f"data: {json.dumps({'done': True, 'full_response': full_response})}\n\n"
+                    except Exception as e:
+                        print(f"Error in direct streaming: {str(e)}")
+                        yield f"data: {json.dumps({'error': str(e)})}\n\n"
                 
                 return Response(generate(), mimetype='text/event-stream')
         else:
@@ -2012,29 +2086,47 @@ def generate_global_chat_stream(question, conversation_history):
     
     client = get_anthropic_client()
     
-    # Create a message and get the streaming response
-    response_stream = client.messages.create(
-        model=AI_MODEL,
-        max_tokens=1024,
-        temperature=0.7,
-        system=general_system_prompt,
-        messages=conversation_history,
-        stream=True
-    )
-    
-    # Track full response for conversation history
-    full_response = ""
-    
-    # Stream each chunk as it comes
-    for chunk in response_stream:
-        if chunk.type == "content_block_delta":
-            text = chunk.delta.text
-            if text:  # Only send non-empty text
-                full_response += text
-                yield f"data: {json.dumps({'text': text})}\n\n"
-    
-    # Send the final response with the complete content
-    yield f"data: {json.dumps({'done': True, 'full_response': full_response})}\n\n"
+    try:
+        # Create a message and get the streaming response
+        response_stream = client.messages.create(
+            model=AI_MODEL,
+            max_tokens=1024,
+            temperature=0.7,
+            system=general_system_prompt,
+            messages=conversation_history,
+            stream=True
+        )
+        
+        # Track full response for conversation history
+        full_response = ""
+        
+        # Stream each chunk as it comes
+        for chunk in response_stream:
+            # Handle different response formats from Anthropic API
+            if hasattr(chunk, 'type') and chunk.type == "content_block_delta":
+                # New API format
+                text = chunk.delta.text
+                if text:  # Only send non-empty text
+                    full_response += text
+                    yield f"data: {json.dumps({'text': text})}\n\n"
+            elif isinstance(chunk, dict) and 'completion' in chunk:
+                # Old API format (for backward compatibility)
+                text = chunk.get('completion', '')
+                if text:
+                    full_response += text
+                    yield f"data: {json.dumps({'text': text})}\n\n"
+            elif isinstance(chunk, str):
+                # Simple string response (fallback)
+                full_response += chunk
+                yield f"data: {json.dumps({'text': chunk})}\n\n"
+        
+        # Send the final response with the complete content
+        yield f"data: {json.dumps({'done': True, 'full_response': full_response})}\n\n"
+    except Exception as e:
+        # Log the error for debugging
+        print(f"Error in global chat streaming response: {str(e)}")
+        # Send an error message to the client
+        yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
 
 @app.route('/global-chat', methods=['POST', 'GET'])
