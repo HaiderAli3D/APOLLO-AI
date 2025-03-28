@@ -449,50 +449,213 @@ examBtn.addEventListener('click', () => {
 // PDF Generation button
 document.getElementById('generate-pdf-btn').addEventListener('click', generatePDF);
 
-function generatePDF() {
-    // Find the latest message that contains LaTeX content
-    let latexContent = null;
-    let lastAssistantMessage = null;
+// Create a hidden container for LaTeX code
+let hiddenLatexContainer;
+
+// Add the hidden container when the page loads
+window.addEventListener('DOMContentLoaded', () => {
+    hiddenLatexContainer = document.createElement('div');
+    hiddenLatexContainer.classList.add('hidden-latex-container');
+    document.body.appendChild(hiddenLatexContainer);
     
-    if (conversationHistory.length > 0) {
-        // First, try to find a message with LaTeX code markers
-        for (let i = conversationHistory.length - 1; i >= 0; i--) {
-            if (conversationHistory[i].role === 'assistant') {
-                const messageText = conversationHistory[i].content;
-                
-                // Save the last assistant message as fallback
-                if (!lastAssistantMessage) {
-                    lastAssistantMessage = messageText;
-                }
-                
-                // Look for common LaTeX document markers
-                if (messageText.includes('\\documentclass') || 
-                    messageText.includes('\\begin{document}')) {
-                    latexContent = messageText;
-                    break;
-                }
-            }
+    // Rest of the existing DOMContentLoaded code...
+    // Check if we have a session ID for this topic already
+    const topicSessionKey = `session_${topicCode}`;
+    const savedSessionId = localStorage.getItem(topicSessionKey);
+    
+    if (savedSessionId) {
+        // We have an existing session, try to load it
+        sessionDBId = savedSessionId;
+        console.log("Found existing session ID:", sessionDBId);
+        loadRecentMessages();
+    } else {
+        // No existing session, start a new one
+        console.log("No existing session found, starting fresh");
+        sendInitialPrompt();
+    }
+});
+
+function generatePDF() {
+    // Show loading state on the button
+    const generateBtn = document.getElementById('generate-pdf-btn');
+    generateBtn.classList.add('loading');
+    generateBtn.disabled = true;
+    
+    // Show status message
+    const statusMessage = document.createElement('div');
+    statusMessage.classList.add('message', 'system');
+    statusMessage.innerHTML = "Generating your exam paper... This may take a moment.";
+    chatMessages.appendChild(statusMessage);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+    
+    // Clear the hidden container
+    hiddenLatexContainer.innerHTML = "";
+    
+    // Create a specialized prompt for LaTeX generation with more explicit instructions
+    const latexPrompt = `
+IMPORTANT: Your response must be ONLY valid LaTeX code with NO explanations, NO comments to the user, and NO markdown formatting.
+
+Create a complete, compilable LaTeX exam paper for an OCR A-Level Computer Science exam on ${topicTitle}.
+
+Your LaTeX code MUST begin with \\documentclass and MUST be structured as follows:
+\\documentclass{article}
+\\usepackage{amsmath,amssymb,graphicx,enumitem,...other needed packages...}
+\\usepackage[a4paper,margin=1in]{geometry}
+
+\\title{OCR A-Level Computer Science: ${topicTitle}}
+\\author{Exam Practice Paper}
+\\date{\\today}
+
+\\begin{document}
+\\maketitle
+
+% Front page content (exam details, etc.)
+...
+
+% Questions section
+\\section*{Questions}
+...4-6 exam-style questions...
+
+% Grade boundaries
+\\section*{Grade Boundaries}
+...A*/A/B/C/D boundaries...
+
+\\end{document}
+
+Requirements:
+- Create 4-6 exam-style questions covering different aspects of ${topicTitle}
+- Include a mix of short-answer and extended-response questions
+- Provide clear mark allocations [X marks] for each question/part
+- Include OCR-style front page with fields for name, candidate number, center number, date
+- Total marks should be between 30-45
+- Include a reasonable time limit (e.g., 60-90 minutes)
+- Include grade boundaries at the end (A*/A/B/C/D)
+
+DO NOT include any explanatory text outside the LaTeX code. Your entire response should be valid LaTeX that can be compiled directly.
+`;
+    
+    // Add unique request ID to track this specific request
+    const requestId = Date.now().toString();
+    
+    // Set the mode context tag for the LaTeX prompt
+    const timeString = new Date().toLocaleTimeString();
+    const contextTag = `[CONTEXT: Topic ${topicCode} ${topicTitle} | ${timeString}]\n\n[MODE: test]`;
+    const latexPromptWithContext = `${latexPrompt}\n\n${contextTag}`;
+    
+    // Send the LaTeX generation request
+    fetch('/student/chat', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            question: latexPromptWithContext,
+            topic_code: topicCode,
+            mode: 'test',
+            stream: true,
+            request_id: requestId,
+            session_id: sessionDBId
+        })
+    })
+    .then(response => {
+        if (!response.ok) {
+            throw new Error('Network response was not ok');
+        }
+        return response.json();
+    })
+    .then(data => {
+        if (data.error) {
+            statusMessage.innerHTML = `Error: ${data.error}`;
+            generateBtn.classList.remove('loading');
+            generateBtn.disabled = false;
+            return;
         }
         
-        // If no LaTeX content found, use the last assistant message
-        if (!latexContent && lastAssistantMessage) {
-            latexContent = lastAssistantMessage;
-        }
-    }
-    
-    if (!latexContent) {
-        alert('No content available to generate PDF');
+        // Set up streaming to collect the LaTeX code in the hidden container
+        const source = new EventSource(`/student/chat?request_id=${requestId}`);
+        let latexContent = '';
+        
+        source.onmessage = function(event) {
+            try {
+                const data = JSON.parse(event.data);
+                
+                if (data.connected) {
+                    // Just a connection confirmation, ignore
+                    return;
+                }
+                
+                if (data.error) {
+                    source.close();
+                    statusMessage.innerHTML = `Error: ${data.error}`;
+                    generateBtn.classList.remove('loading');
+                    generateBtn.disabled = false;
+                    return;
+                }
+                
+                if (data.done) {
+                    source.close();
+                    
+                    // Use the full response if available
+                    if (data.full_response) {
+                        latexContent = data.full_response;
+                    }
+                    
+                    // Update status message
+                    statusMessage.innerHTML = "Exam paper generated! Compiling PDF...";
+                    
+                    // Add the assistant's response to conversation history
+                    // But don't display it in the UI
+                    conversationHistory.push({
+                        role: "assistant",
+                        content: latexContent
+                    });
+                    
+                    // Compile the PDF
+                    compilePdfFromLatex(latexContent, statusMessage, generateBtn);
+                    
+                    return;
+                }
+                
+                if (data.text) {
+                    latexContent += data.text;
+                    hiddenLatexContainer.innerHTML = latexContent;
+                }
+            } catch (error) {
+                console.error('Error parsing SSE message:', error, event.data);
+                statusMessage.innerHTML = `Error: Failed to parse streaming response.`;
+                generateBtn.classList.remove('loading');
+                generateBtn.disabled = false;
+            }
+        };
+        
+        source.onerror = function(error) {
+            console.error('EventSource error:', error);
+            source.close();
+            statusMessage.innerHTML = `Error: Failed to generate LaTeX. Please try again.`;
+            generateBtn.classList.remove('loading');
+            generateBtn.disabled = false;
+        };
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        statusMessage.innerHTML = `Error: ${error.message}`;
+        generateBtn.classList.remove('loading');
+        generateBtn.disabled = false;
+    });
+}
+
+// Helper function to compile PDF from LaTeX
+function compilePdfFromLatex(latexContent, statusMessage, generateBtn) {
+    // Validate that the content actually contains LaTeX code
+    if (!latexContent.includes('\\documentclass') || !latexContent.includes('\\begin{document}')) {
+        console.error('Invalid LaTeX content:', latexContent.substring(0, 100) + '...');
+        statusMessage.innerHTML = `Error: The AI didn't generate proper LaTeX code. Please try again.`;
+        generateBtn.classList.remove('loading');
+        generateBtn.disabled = false;
         return;
     }
     
-    // Show loading indicator
-    const loadingDiv = document.createElement('div');
-    loadingDiv.classList.add('message', 'system');
-    loadingDiv.innerHTML = "Generating LaTeX PDF... This may take a moment.";
-    chatMessages.appendChild(loadingDiv);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
-    
-    // Make API request
+    // Make API request to compile PDF
     fetch('/generate-exam-pdf', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -504,34 +667,50 @@ function generatePDF() {
     })
     .then(response => response.json())
     .then(data => {
-        // Remove loading indicator
-        loadingDiv.remove();
-        
         if (data.error) {
             throw new Error(data.error);
         }
         
         if (data.success && data.pdf_url) {
+            // Update status message
+            statusMessage.innerHTML = `
+                Exam PDF generated successfully and opened in a new tab! 
+                <a href="/student/pdf-library">View all your PDFs</a>
+            `;
+            
             // Open PDF in new tab
             window.open(data.pdf_url, '_blank');
             
-            // Show success message with link to PDF library
-            const successDiv = document.createElement('div');
-            successDiv.classList.add('message', 'system');
-            successDiv.innerHTML = `
-                PDF generated successfully and opened in a new tab! 
-                <a href="/student/pdf-library">View all your PDFs</a>
-            `;
-            chatMessages.appendChild(successDiv);
+            // Add to db session
+            if (sessionDBId) {
+                fetch('/student/save-response', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        session_id: sessionDBId,
+                        response: `I've generated an exam PDF for you on the topic of ${topicTitle}. The PDF has been opened in a new tab. You can also [view it in your PDF library](/student/pdf-library).`
+                    })
+                }).catch(error => {
+                    console.error('Error saving response to database:', error);
+                });
+            }
         } else {
             throw new Error('Failed to generate PDF');
         }
+        
+        // Restore button state
+        generateBtn.classList.remove('loading');
+        generateBtn.disabled = false;
         
         chatMessages.scrollTop = chatMessages.scrollHeight;
     })
     .catch(error => {
         console.error('Error generating PDF:', error);
-        loadingDiv.innerHTML = `Error generating PDF: ${error.message}`;
+        statusMessage.innerHTML = `Error generating PDF: ${error.message}`;
+        generateBtn.classList.remove('loading');
+        generateBtn.disabled = false;
     });
 }
 

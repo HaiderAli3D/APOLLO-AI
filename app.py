@@ -651,51 +651,27 @@ Aim for brief, focused responses suitable for last-minute revision. Ensure the s
 
     elif mode == "test":
         return f"""
-You are an AI tutor preparing a practice exam in LaTeX. You MUST follow these rules when generating the exam:
-1. You will only output LaTeX code—no other text, no explanations, no disclaimers.
-2. The code must be syntactically valid, starting on the very first line with LaTeX commands (e.g., \documentclass{...}).
-3. You must not include images or external resources in the LaTeX code.
-4. The exam must replicate an OCR-style front page, with fields for name, candidate number, center number, date, etc., and must not contain any questions on the front page.
-5. The exam must have 4–6 questions covering {topic_info} from the OCR A-Level Computer Science curriculum ({component_title}), with a total of 30–45 marks. The exam questions should be styled, numbered, and formatted like an OCR A-Level paper. Mix short-answer and extended-response questions.
-6. Clearly state grade boundaries (A*, A, B, C, D) on the exam and give a time limit.
-7. Provide lines/spaces for students to write their answers under each question.
-8. Do not provide any additional commentary in the output—ONLY the LaTeX code for the exam. No further text, titles, or explanation before or after the code.
-9. **Your total LaTeX code output must be fewer than 5000 characters (including whitespace).** If necessary, shorten or simplify the exam content to stay under this limit.
+You are now in test mode for {topic_info} from the OCR A-Level Computer Science curriculum ({component_title}).
 
-USER PROMPT (or "User" message to the AI):
-You are now testing the user’s knowledge of {topic_info} from the OCR A-Level Computer Science curriculum ({component_title}).
+You are now helping the user prepare for an OCR A-Level Computer Science exam on {detailed_topic} from the OCR A-Level Computer Science curriculum ({component_title}).
 
-Please create a practice assessment as a PDF using LaTeX that follows these rules:
-- 4–6 exam-style questions (short-answer and extended-response) covering various aspects of {topic_info}.
-- Clearly states grade boundaries (A*/A/B/C/D).
-- 30–45 total marks, with a reasonable time limit.
-- The first page must replicate a real OCR exam front page (no questions, just fields for name/candidate/center/date, paper title, total marks, general guidance, and time limit).
-- Output only valid LaTeX code, starting on the very first line. Include no text outside the LaTeX code.
-- Do not use any images or external resources.
-- **All LaTeX code must be under 5000 characters, including whitespace.**
+Your role is to:
+1. Welcome the user to TEST mode for {detailed_topic}
+2. Explain that in this mode, they can practice with realistic exam-style questions and assessments
+3. Instruct them to click the "Generate Exam PDF" button at the top to create a complete mock exam paper
+4. Mention that the system will automatically create an OCR-style exam paper focused on {detailed_topic} with appropriate:
+- Format and styling matching real OCR papers
+- Mix of question types (4-6 questions)
+- Total of 30-45 marks
+- Grade boundaries
+- Spaces for answers
+5. Offer to help them prepare for the exam by explaining key concepts or answering specific questions about {detailed_topic}
+6. Let them know that after completing the exam, they can return to discuss their answers or ask for clarification on any problems they found challenging
+7. If the user asks for help on a question use Polya's principles to help guide them through the question.
 
-**Assessment Process**:
-1. Present all questions at once (i.e., the entire exam in LaTeX).
-2. Wait for the user’s answers before providing any marking or feedback.
-3. After the user submits answers, mark them like an OCR examiner, provide a mark scheme, and assign an overall grade.
-4. Offer feedback according to Pólya’s four-step problem-solving approach:
-   - Understanding the Problem
-   - Devising a Plan
-   - Carrying Out the Plan
-   - Looking Back
+Try not to overwhelm the user with large responses.
 
-IMPORTANT NOTES:
-- The first line of your response must be a LaTeX command (e.g., \documentclass{...}).
-- Do not output anything else other than the LaTeX code. 
-- The LaTeX code must be complete and compile without further editing.
-- **Keep your LaTeX code under 5000 characters, including whitespace.**
-- When I request the exam, respond ONLY with LaTeX code as per the instructions above. 
-- If I ask for marking or clarification after submitting my answers, you may then respond in normal English.
-
-ONLY RESPOND WITH LATEX CODE NOTHING ELSE
-YOUR FIRST LINE SHOULD BE \documentclass
-ONLY RESPOND WITH LATEX
-
+Keep your response friendly, encouraging, to the poin, and focused on helping the student prepare effectively for their exam.
 """
 
     else:
@@ -1910,12 +1886,10 @@ def calculate_user_streak(user_id):
     # Get today's date and yesterday's date
     today = datetime.now().date()
     yesterday = today - timedelta(days=1)
-    two_days_ago = today - timedelta(days=2)
     
     # Format dates as strings
     today_str = today.strftime('%Y-%m-%d')
     yesterday_str = yesterday.strftime('%Y-%m-%d')
-    two_days_ago_str = two_days_ago.strftime('%Y-%m-%d')
     
     # Check if user has activity for today
     cursor.execute(
@@ -1931,16 +1905,9 @@ def calculate_user_streak(user_id):
     )
     has_activity_yesterday = cursor.fetchone() is not None
     
-    # Check if user has activity for two days ago
+    # Get all activity dates for this user in order
     cursor.execute(
-        "SELECT 1 FROM user_activity WHERE user_id = ? AND activity_date = ?",
-        (user_id, two_days_ago_str)
-    )
-    has_activity_two_days_ago = cursor.fetchone() is not None
-    
-    # Get all activity dates for this user in descending order
-    cursor.execute(
-        "SELECT activity_date FROM user_activity WHERE user_id = ? ORDER BY activity_date DESC",
+        "SELECT DISTINCT activity_date FROM user_activity WHERE user_id = ? ORDER BY activity_date ASC",
         (user_id,)
     )
     activity_dates = [datetime.strptime(row[0], '%Y-%m-%d').date() for row in cursor.fetchall()]
@@ -1951,42 +1918,53 @@ def calculate_user_streak(user_id):
     if not activity_dates:
         return {'streak': 0, 'streak_at_risk': False}
     
-    # Calculate streak
-    streak = 0
-    streak_at_risk = False
+    # Determine if streak is at risk
+    streak_at_risk = has_activity_yesterday and not has_activity_today
     
-    # If user has activity today, start counting from today
-    if has_activity_today:
-        streak = 1
-        date_to_check = yesterday
-    # If user has activity yesterday but not today, start counting from yesterday
-    # and mark streak as at risk
-    elif has_activity_yesterday:
-        streak = 1
-        date_to_check = two_days_ago
-        streak_at_risk = True
-    # If user has activity two days ago but not yesterday or today,
-    # streak is 0 (streak was broken)
-    else:
-        return {'streak': 0, 'streak_at_risk': False}
+    # Improved streak calculation - count consecutive days properly
+    streak = 1  # Start with 1 for the most recent activity
     
-    # Continue counting streak from previous days
-    for date in activity_dates:
-        if date == today or date == yesterday:
-            # Skip today and yesterday as they were already counted
-            continue
-            
-        if date == date_to_check:
-            streak += 1
-            date_to_check = date_to_check - timedelta(days=1)
+    # Group dates by consecutive days
+    consecutive_groups = []
+    current_group = [activity_dates[0]]
+    
+    for i in range(1, len(activity_dates)):
+        current_date = activity_dates[i]
+        prev_date = activity_dates[i-1]
+        
+        # Check if dates are consecutive (1 day apart)
+        if (current_date - prev_date).days == 1:
+            current_group.append(current_date)
         else:
-            # Allow for one missed day in the streak
-            if date == date_to_check - timedelta(days=1) and not streak_at_risk:
-                streak_at_risk = True
-                date_to_check = date - timedelta(days=1)
-            else:
-                # Streak is broken
-                break
+            # Start a new group
+            consecutive_groups.append(current_group)
+            current_group = [current_date]
+    
+    # Add the last group
+    consecutive_groups.append(current_group)
+    
+    # Find the longest streak that includes the most recent activity
+    # The most recent activity is either today or should be connected to today
+    if has_activity_today:
+        # If user has activity today, find the active streak
+        most_recent_date = today
+    else:
+        # If no activity today, get the most recent activity date
+        most_recent_date = max(activity_dates)
+    
+    # Find the group containing the most recent date or the date before it (if streak is at risk)
+    active_streak_group = None
+    for group in consecutive_groups:
+        if most_recent_date in group or (streak_at_risk and yesterday in group):
+            active_streak_group = group
+            break
+    
+    # Calculate streak from the active group
+    if active_streak_group:
+        streak = len(active_streak_group)
+    else:
+        # If no active group (should not happen), default to 1
+        streak = 1
     
     return {'streak': streak, 'streak_at_risk': streak_at_risk}
 

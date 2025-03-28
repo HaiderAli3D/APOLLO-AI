@@ -268,9 +268,19 @@ function renderSpacedRepetitionReminders(topicData) {
     
     // Add event listeners to mark as reviewed buttons
     const reviewButtons = document.querySelectorAll('.mark-reviewed-btn');
+    console.log(`Found ${reviewButtons.length} review buttons to attach event listeners to`);
+    
     reviewButtons.forEach(button => {
-        button.addEventListener('click', function() {
+        // Remove any existing event listeners first to prevent duplicates
+        const newButton = button.cloneNode(true);
+        button.parentNode.replaceChild(newButton, button);
+        
+        // Add the event listener
+        newButton.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
             const topicCode = this.dataset.topicCode;
+            console.log('Review button clicked for topic:', topicCode);
             markTopicAsReviewed(topicCode);
         });
     });
@@ -302,28 +312,118 @@ function calculateDueTopics(topicData, today) {
 }
 
 function markTopicAsReviewed(topicCode) {
-    // Send request to mark topic as reviewed
-    fetch('/student/mark-topic-reviewed', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-            topic_code: topicCode
-        })
-    })
-    .then(response => response.json())
-    .then(data => {
-        if (data.success) {
-            // Refresh spaced repetition widget
-            initializeSpacedRepetition();
-            // Track this activity
-            trackUserActivity();
-        } else {
-            console.error('Error marking topic as reviewed:', data.error);
+    // Log the start of the function
+    console.log('Marking topic as reviewed:', topicCode);
+    
+    // Show immediate visual feedback
+    const btn = document.querySelector(`.mark-reviewed-btn[data-topic-code="${topicCode}"]`);
+    if (btn) {
+        btn.textContent = "Updating...";
+        btn.disabled = true;
+    }
+    
+    // Try to update the last studied date locally first
+    // This provides immediate feedback even if the server request fails
+    const today = new Date();
+    
+    // Find the topic in the topicProgressData array
+    const topicIndex = topicProgressData.findIndex(t => t.topicCode === topicCode);
+    if (topicIndex !== -1) {
+        // Update the lastStudied date in our local data
+        topicProgressData[topicIndex].lastStudied = today.toISOString().split('T')[0];
+    }
+    
+    // Function to handle successful review
+    const handleSuccess = () => {
+        console.log('Topic marked as reviewed successfully');
+        
+        // Refresh spaced repetition widget
+        renderSpacedRepetitionReminders(topicProgressData);
+        
+        // Track this activity
+        trackUserActivity();
+        
+        // Show success feedback
+        if (btn) {
+            btn.textContent = "Reviewed!";
+            btn.classList.add("success");
+            btn.disabled = false;
+            
+            // Reset button after 2 seconds
+            setTimeout(() => {
+                btn.textContent = "Mark as Reviewed";
+                btn.classList.remove("success");
+            }, 2000);
         }
-    })
-    .catch(error => console.error('Error:', error));
+    };
+    
+    // Function to handle error
+    const handleError = (error) => {
+        console.error('Error marking topic as reviewed:', error);
+        
+        if (btn) {
+            btn.textContent = "Retry";
+            btn.disabled = false;
+            btn.classList.add("error");
+            
+            // Reset button after 2 seconds
+            setTimeout(() => {
+                btn.textContent = "Mark as Reviewed";
+                btn.classList.remove("error");
+            }, 2000);
+        }
+    };
+    
+    // Try to send request to server with retry logic
+    const maxRetries = 3;
+    let retryCount = 0;
+    
+    function attemptRequest() {
+        fetch('/student/mark-topic-reviewed', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                topic_code: topicCode
+            })
+        })
+        .then(response => {
+            console.log('Response status:', response.status);
+            if (!response.ok) {
+                throw new Error(`Server responded with status: ${response.status}`);
+            }
+            return response.json();
+        })
+        .then(data => {
+            console.log('Mark as reviewed response:', data);
+            if (data.success) {
+                handleSuccess();
+            } else {
+                console.error('Error from server:', data.error);
+                throw new Error(data.error || 'Failed to mark topic as reviewed');
+            }
+        })
+        .catch(error => {
+            console.error(`Attempt ${retryCount + 1} failed:`, error);
+            
+            if (retryCount < maxRetries) {
+                retryCount++;
+                console.log(`Retrying (${retryCount}/${maxRetries})...`);
+                setTimeout(attemptRequest, 1000); // Wait 1 second before retrying
+            } else {
+                console.error('Max retries reached. Giving up.');
+                handleError(error);
+                
+                // Even if server update fails, we can still update the UI optimistically
+                // This ensures the user experience is not broken by network issues
+                handleSuccess();
+            }
+        });
+    }
+    
+    // Start the request process
+    attemptRequest();
 }
 
 // ========== WIDGET 3: EXAM COUNTDOWN ==========
