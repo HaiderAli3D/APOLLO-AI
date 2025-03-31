@@ -20,7 +20,9 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
-# import pyrebase  # Commented out due to compatibility issues with Python 3.12
+import firebase_admin
+from firebase_admin import credentials, auth
+import pyrebase
 
 # Model Option:
 # Best model but expensive: "claude-3-7-sonnet-20250219"
@@ -124,6 +126,119 @@ def close_connections(exception):
 
 # Load environment variables
 load_dotenv()
+
+# Initialize Firebase Admin SDK
+try:
+    cred = credentials.Certificate("apollo-auth-753b5-firebase-adminsdk-fbsvc-6b6d2904d5.json")
+    firebase_admin.initialize_app(cred)
+    print("Firebase Admin SDK initialized successfully")
+except Exception as e:
+    print(f"Error initializing Firebase Admin SDK: {e}")
+
+# Initialize Firebase client for frontend operations
+firebase_config = {
+    "apiKey": "AIzaSyBVLWsgEgQxBKDpQ4a7nb-CKhMf-ZEwnmA",
+    "authDomain": "apollo-auth-753b5.firebaseapp.com",
+    "projectId": "apollo-auth-753b5",
+    "storageBucket": "apollo-auth-753b5.firebasestorage.app",
+    "messagingSenderId": "233177806452",
+    "appId": "1:233177806452:web:189d47b01c3de6e8110321",
+    "measurementId": "G-DJXDJWE6PJ",
+    "databaseURL": ""  # Add if you're using Realtime Database
+}
+
+# Firebase authentication helper functions
+def verify_firebase_token(id_token):
+    """Verify Firebase ID token and return user info."""
+    try:
+        decoded_token = auth.verify_id_token(id_token)
+        uid = decoded_token['uid']
+        return True, uid, decoded_token
+    except Exception as e:
+        print(f"Token verification error: {e}")
+        return False, None, None
+
+def get_or_create_firebase_user(uid, email, full_name, role='student', profile_picture_url=None, decoded_token=None):
+    """Get existing user by Firebase UID or create a new one."""
+    conn = sqlite3.connect('user_database.db')
+    cursor = conn.cursor()
+    
+    # Get profile picture from token if not provided explicitly
+    if profile_picture_url is None and decoded_token:
+        # Check if token has picture URL (common with Google authentication)
+        profile_picture_url = decoded_token.get('picture', None)
+        
+        # Check Firebase provider
+        provider = decoded_token.get('firebase', {}).get('sign_in_provider', '')
+        if provider == 'google.com' and not profile_picture_url:
+            # Try alternative picture field that might be present in Google auth
+            profile_picture_url = decoded_token.get('photoURL', None)
+    
+    # Check if user exists by Firebase UID
+    cursor.execute("SELECT * FROM users WHERE firebase_uid = ?", (uid,))
+    user = cursor.fetchone()
+    
+    if user:
+        # User exists, update profile picture if provided
+        if profile_picture_url:
+            cursor.execute(
+                "UPDATE users SET profile_picture_url = ? WHERE id = ?",
+                (profile_picture_url, user[0])
+            )
+            conn.commit()
+            
+            # Refresh user data
+            cursor.execute("SELECT * FROM users WHERE id = ?", (user[0],))
+            user = cursor.fetchone()
+            
+        conn.close()
+        return user
+    
+    # Check if user exists by email (for migration)
+    cursor.execute("SELECT * FROM users WHERE email = ?", (email,))
+    user = cursor.fetchone()
+    
+    if user:
+        # Update existing user with Firebase UID and profile picture
+        update_query = "UPDATE users SET firebase_uid = ?, account_migrated = 1"
+        params = [uid, user[0]]
+        
+        if profile_picture_url:
+            update_query += ", profile_picture_url = ?"
+            params.insert(1, profile_picture_url)
+            
+        update_query += " WHERE id = ?"
+        
+        cursor.execute(update_query, params)
+        conn.commit()
+        
+        # Refresh user data
+        cursor.execute("SELECT * FROM users WHERE id = ?", (user[0],))
+        user = cursor.fetchone()
+        
+        conn.close()
+        return user
+    
+    # Create new user
+    insert_query = "INSERT INTO users (email, password_hash, full_name, role, firebase_uid, account_migrated"
+    values = [email, "firebase_auth", full_name, role, uid, 1]
+    
+    if profile_picture_url:
+        insert_query += ", profile_picture_url"
+        values.append(profile_picture_url)
+        
+    insert_query += ") VALUES (" + ", ".join(["?"] * len(values)) + ")"
+    
+    cursor.execute(insert_query, values)
+    conn.commit()
+    user_id = cursor.lastrowid
+    
+    # Get the created user
+    cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    user = cursor.fetchone()
+    conn.close()
+    
+    return user
 
 # Set up Anthropic API client
 def get_anthropic_client():
@@ -247,8 +362,10 @@ def init_user_db():
         email TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL,
         full_name TEXT NOT NULL,
-        role TEXT CHECK(role IN ('student', 'admin')) DEFAULT 'student',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        role TEXT CHECK(role IN ('student', 'admin', 'developer')) DEFAULT 'student',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        firebase_uid TEXT,
+        account_migrated BOOLEAN DEFAULT 0
     )
     ''')
     
@@ -339,24 +456,13 @@ def create_user(email, password, full_name, role='student'):
         conn.close()
         return False, str(e)
 
-# Authentication decorators
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if not session.get('user_id'):
-            flash('Please log in to access this page', 'error')
-            return redirect(url_for('student_login'))
-        return f(*args, **kwargs)
-    return decorated_function
+# Import Firebase Authentication Middleware
+from firebase_auth_middleware import firebase_auth_required, admin_auth_required, developer_auth_required, validate_firebase_token, refresh_firebase_token
 
-def admin_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if not session.get('is_admin'):
-            flash('Admin access required', 'error')
-            return redirect(url_for('login'))
-        return f(*args, **kwargs)
-    return decorated_function
+# Authentication decorators - using Firebase middleware now
+login_required = firebase_auth_required
+admin_required = admin_auth_required
+developer_required = developer_auth_required
 
 # Create system prompt for Claude
 def create_system_prompt():
@@ -651,27 +757,51 @@ Aim for brief, focused responses suitable for last-minute revision. Ensure the s
 
     elif mode == "test":
         return f"""
-You are now in test mode for {topic_info} from the OCR A-Level Computer Science curriculum ({component_title}).
+You are an AI tutor preparing a practice exam in LaTeX. You MUST follow these rules when generating the exam:
+1. You will only output LaTeX code—no other text, no explanations, no disclaimers.
+2. The code must be syntactically valid, starting on the very first line with LaTeX commands (e.g., \documentclass{...}).
+3. You must not include images or external resources in the LaTeX code.
+4. The exam must replicate an OCR-style front page, with fields for name, candidate number, center number, date, etc., and must not contain any questions on the front page.
+5. The exam must have 4–6 questions covering {topic_info} from the OCR A-Level Computer Science curriculum ({component_title}), with a total of 30–45 marks. The exam questions should be styled, numbered, and formatted like an OCR A-Level paper. Mix short-answer and extended-response questions.
+6. Clearly state grade boundaries (A*, A, B, C, D) on the exam and give a time limit.
+7. Provide lines/spaces for students to write their answers under each question.
+8. Do not provide any additional commentary in the output—ONLY the LaTeX code for the exam. No further text, titles, or explanation before or after the code.
+9. **Your total LaTeX code output must be fewer than 5000 characters (including whitespace).** If necessary, shorten or simplify the exam content to stay under this limit.
 
-You are now helping the user prepare for an OCR A-Level Computer Science exam on {detailed_topic} from the OCR A-Level Computer Science curriculum ({component_title}).
+USER PROMPT (or "User" message to the AI):
+You are now testing the user’s knowledge of {topic_info} from the OCR A-Level Computer Science curriculum ({component_title}).
 
-Your role is to:
-1. Welcome the user to TEST mode for {detailed_topic}
-2. Explain that in this mode, they can practice with realistic exam-style questions and assessments
-3. Instruct them to click the "Generate Exam PDF" button at the top to create a complete mock exam paper
-4. Mention that the system will automatically create an OCR-style exam paper focused on {detailed_topic} with appropriate:
-- Format and styling matching real OCR papers
-- Mix of question types (4-6 questions)
-- Total of 30-45 marks
-- Grade boundaries
-- Spaces for answers
-5. Offer to help them prepare for the exam by explaining key concepts or answering specific questions about {detailed_topic}
-6. Let them know that after completing the exam, they can return to discuss their answers or ask for clarification on any problems they found challenging
-7. If the user asks for help on a question use Polya's principles to help guide them through the question.
+Please create a practice assessment as a PDF using LaTeX that follows these rules:
+- 4–6 exam-style questions (short-answer and extended-response) covering various aspects of {topic_info}.
+- Clearly states grade boundaries (A*/A/B/C/D).
+- 30–45 total marks, with a reasonable time limit.
+- The first page must replicate a real OCR exam front page (no questions, just fields for name/candidate/center/date, paper title, total marks, general guidance, and time limit).
+- Output only valid LaTeX code, starting on the very first line. Include no text outside the LaTeX code.
+- Do not use any images or external resources.
+- **All LaTeX code must be under 5000 characters, including whitespace.**
 
-Try not to overwhelm the user with large responses.
+**Assessment Process**:
+1. Present all questions at once (i.e., the entire exam in LaTeX).
+2. Wait for the user’s answers before providing any marking or feedback.
+3. After the user submits answers, mark them like an OCR examiner, provide a mark scheme, and assign an overall grade.
+4. Offer feedback according to Pólya’s four-step problem-solving approach:
+   - Understanding the Problem
+   - Devising a Plan
+   - Carrying Out the Plan
+   - Looking Back
 
-Keep your response friendly, encouraging, to the poin, and focused on helping the student prepare effectively for their exam.
+IMPORTANT NOTES:
+- The first line of your response must be a LaTeX command (e.g., \documentclass{...}).
+- Do not output anything else other than the LaTeX code. 
+- The LaTeX code must be complete and compile without further editing.
+- **Keep your LaTeX code under 5000 characters, including whitespace.**
+- When I request the exam, respond ONLY with LaTeX code as per the instructions above. 
+- If I ask for marking or clarification after submitting my answers, you may then respond in normal English.
+
+ONLY RESPOND WITH LATEX CODE NOTHING ELSE
+YOUR FIRST LINE SHOULD BE \documentclass
+ONLY RESPOND WITH LATEX
+
 """
 
     else:
@@ -740,78 +870,333 @@ def index():
 def register():
     """Registration page for new users."""
     if request.method == 'POST':
-        email = request.form.get('email')
-        password = request.form.get('password')
-        full_name = request.form.get('full_name')
-        
-        if not email or not password or not full_name:
-            flash('All fields are required', 'error')
-            return render_template('register.html')
+        try:
+            data = request.json
+            id_token = data.get('idToken')
+            full_name = data.get('full_name')
             
-        # Create user
-        success, result = create_user(email, password, full_name)
-        
-        if success:
-            # Set session
-            session['user_id'] = result
-            session['user_email'] = email
-            session['user_name'] = full_name
-            flash('Registration successful!', 'success')
-            return redirect(url_for('student_dashboard'))
-        else:
-            flash(f'Registration failed: {result}', 'error')
+            if not id_token:
+                return jsonify({'error': 'No ID token provided'}), 400
+                
+            # Verify token
+            success, uid, decoded_token = verify_firebase_token(id_token)
+            if not success:
+                return jsonify({'error': 'Invalid ID token'}), 401
+                
+            # Get email from token
+            email = decoded_token.get('email', '')
+            name = full_name or decoded_token.get('name', '')
             
+            if not name:
+                name = email.split('@')[0]  # Use part of email as name if not provided
+                
+            # Get or create user
+            user = get_or_create_firebase_user(uid, email, name, 'student')
+            
+            # Set session data
+            session['user_id'] = user[0]  # Index 0 is id
+            session['user_email'] = user[1]  # Index 1 is email 
+            session['user_name'] = user[3]  # Index 3 is full_name
+            session['firebase_token'] = id_token
+            session['firebase_uid'] = uid
+            
+            return jsonify({
+                'success': True, 
+                'redirect': url_for('student_dashboard')
+            })
+                
+        except Exception as e:
+            print(f"Error in register: {e}")
+            return jsonify({'error': str(e)}), 500
+            
+    # For GET request, render the registration template
     return render_template('register.html')
 
 @app.route('/student/login', methods=['GET', 'POST'])
 def student_login():
     """Login page for student access."""
     if request.method == 'POST':
-        email = request.form.get('email')
-        password = request.form.get('password')
-        
-        if not email or not password:
-            flash('Email and password are required', 'error')
-            return render_template('student/login.html')
+        # Handle API request from Firebase Authentication
+        try:
+            data = request.json
+            id_token = data.get('idToken')
             
-        # Get user from database
-        user = get_user_by_email(email)
-        
-        if user and check_password_hash(user[2], password):  # Index 2 is password_hash
-            # Set session
+            if not id_token:
+                return jsonify({'error': 'No ID token provided'}), 400
+                
+            # Verify token
+            success, uid, decoded_token = verify_firebase_token(id_token)
+            if not success:
+                return jsonify({'error': 'Invalid ID token'}), 401
+                
+            # Get email from token
+            email = decoded_token.get('email', '')
+            name = decoded_token.get('name', '')
+            
+            if not name:
+                name = email.split('@')[0]  # Use part of email as name if not provided
+                
+            # Get or create user
+            user = get_or_create_firebase_user(uid, email, name, 'student')
+            
+            # Set session data
             session['user_id'] = user[0]  # Index 0 is id
-            session['user_email'] = user[1]  # Index 1 is email
+            session['user_email'] = user[1]  # Index 1 is email 
             session['user_name'] = user[3]  # Index 3 is full_name
+            session['firebase_token'] = id_token
+            session['firebase_uid'] = uid
             
             if user[4] == 'admin':  # Index 4 is role
                 session['is_admin'] = True
                 
-            flash('Login successful!', 'success')
-            return redirect(url_for('student_dashboard'))
-        else:
-            flash('Invalid email or password', 'error')
+            return jsonify({
+                'success': True, 
+                'redirect': url_for('student_dashboard')
+            })
+                
+        except Exception as e:
+            print(f"Error in student_login: {e}")
+            return jsonify({'error': str(e)}), 500
             
+    # For GET request, render the login template
     return render_template('student/login.html')
 
-@app.route('/login', methods=['GET', 'POST'])
-def login():
+@app.route('/admin/login', methods=['GET', 'POST'])
+def admin_login():
     """Login page for admin access."""
     if request.method == 'POST':
-        username = request.form.get('username')
-        password = request.form.get('password')
-        
-        # For development - use environment variables in production
-        admin_username = os.environ.get('ADMIN_USERNAME', 'admin')
-        admin_password = os.environ.get('ADMIN_PASSWORD', 'password')
-        
-        # Simple authentication
-        if username == admin_username and password == admin_password:
-            session['is_admin'] = True
-            return redirect(url_for('admin_dashboard'))
+        # Check if it's a JSON request (Firebase auth)
+        if request.is_json:
+            try:
+                data = request.json
+                id_token = data.get('idToken')
+                
+                if not id_token:
+                    return jsonify({'error': 'No ID token provided'}), 400
+                    
+                # Verify token
+                success, uid, decoded_token = verify_firebase_token(id_token)
+                if not success:
+                    return jsonify({'error': 'Invalid ID token'}), 401
+                    
+                # Get email from token
+                email = decoded_token.get('email', '')
+                name = decoded_token.get('name', '')
+                
+                if not name:
+                    name = email.split('@')[0]
+                
+                # Only allow specific admin emails with Firebase
+                if email != 'mr.haider.sm.ali@gmail.com' and not email.endswith('@admin.ocrcstutor.com'):
+                    return jsonify({'error': 'This account does not have admin privileges'}), 403
+                
+                # Get or create admin user
+                user = get_or_create_firebase_user(uid, email, name, 'admin')
+                
+                # Set session data
+                session['user_id'] = user[0]
+                session['user_email'] = user[1] 
+                session['user_name'] = user[3]
+                session['is_admin'] = True
+                session['firebase_token'] = id_token
+                session['firebase_uid'] = uid
+                
+                # Check if user is also a developer
+                if user[4] == 'developer':
+                    session['is_developer'] = True
+                
+                return jsonify({
+                    'success': True, 
+                    'redirect': url_for('admin_dashboard')
+                })
+            except Exception as e:
+                print(f"Error in admin_login: {e}")
+                return jsonify({'error': str(e)}), 500
         else:
-            flash('Invalid credentials', 'error')
+            # Traditional form-based login
+            email = request.form.get('email')
+            password = request.form.get('password')
             
+            if not email or not password:
+                flash('Email and password are required', 'error')
+                return render_template('login.html')
+                
+            # Special handling for the default admin email
+            if email == 'mr.haider.sm.ali@gmail.com':
+                # Check if user already exists
+                user = get_user_by_email(email)
+                
+                if not user:
+                    # Create new admin if user doesn't exist
+                    success, user_id = create_user(email, password, 'Admin User', 'admin')
+                    if success:
+                        session['user_id'] = user_id
+                        session['user_email'] = email
+                        session['user_name'] = 'Admin User'
+                        session['is_admin'] = True
+                        flash('Admin account created successfully', 'success')
+                        return redirect(url_for('admin_dashboard'))
+                else:
+                    # For existing user, verify password and update role if needed
+                    if check_password_hash(user[2], password):
+                        session['user_id'] = user[0]
+                        session['user_email'] = email
+                        session['user_name'] = user[3]
+                        session['is_admin'] = True
+                        
+                        # Update role to admin if not already
+                        conn = sqlite3.connect('user_database.db')
+                        cursor = conn.cursor()
+                        cursor.execute("UPDATE users SET role = 'admin' WHERE id = ?", (user[0],))
+                        conn.commit()
+                        conn.close()
+                        
+                        return redirect(url_for('admin_dashboard'))
+                    else:
+                        flash('Invalid password', 'error')
+                        return render_template('login.html')
+            
+            # Standard login for other users
+            user = get_user_by_email(email)
+            
+            # Verify user exists, password is correct
+            if user and check_password_hash(user[2], password):
+                # If user is admin or developer, allow admin access
+                if user[4] in ['admin', 'developer']:
+                    session['user_id'] = user[0]
+                    session['user_email'] = user[1]
+                    session['user_name'] = user[3]
+                    session['is_admin'] = True
+                    
+                    # If they're also a developer, set that flag too
+                    if user[4] == 'developer':
+                        session['is_developer'] = True
+                        
+                    return redirect(url_for('admin_dashboard'))
+                else:
+                    flash('Your account does not have admin privileges', 'error')
+            else:
+                flash('Invalid email or password', 'error')
+                
+    # For GET request, render the login template
     return render_template('login.html')
+
+@app.route('/login')
+def login():
+    """Redirect to admin login for backward compatibility."""
+    return redirect(url_for('admin_login'))
+
+@app.route('/developer/login', methods=['GET', 'POST'])
+def developer_login():
+    """Login page for developer access."""
+    if request.method == 'POST':
+        # Check if it's a JSON request (Firebase auth)
+        if request.is_json:
+            try:
+                data = request.json
+                id_token = data.get('idToken')
+                
+                if not id_token:
+                    return jsonify({'error': 'No ID token provided'}), 400
+                    
+                # Verify token
+                success, uid, decoded_token = verify_firebase_token(id_token)
+                if not success:
+                    return jsonify({'error': 'Invalid ID token'}), 401
+                    
+                # Get email from token
+                email = decoded_token.get('email', '')
+                name = decoded_token.get('name', '')
+                
+                if not name:
+                    name = email.split('@')[0]
+                
+                # Only allow specific developer emails with Firebase
+                if email != 'mr.haider.sm.ali@gmail.com' and not email.endswith('@dev.ocrcstutor.com'):
+                    return jsonify({'error': 'This account does not have developer privileges'}), 403
+                
+                # Get or create developer user
+                user = get_or_create_firebase_user(uid, email, name, 'developer')
+                
+                # Set session data
+                session['user_id'] = user[0]
+                session['user_email'] = user[1]
+                session['user_name'] = user[3]
+                session['is_developer'] = True
+                session['is_admin'] = True  # Developer also has admin privileges
+                session['firebase_token'] = id_token
+                session['firebase_uid'] = uid
+                
+                return jsonify({
+                    'success': True, 
+                    'redirect': url_for('developer_dashboard')
+                })
+            except Exception as e:
+                print(f"Error in developer_login: {e}")
+                return jsonify({'error': str(e)}), 500
+        else:
+            # Traditional form-based login
+            email = request.form.get('email')
+            password = request.form.get('password')
+            
+            if not email or not password:
+                flash('Email and password are required', 'error')
+                return render_template('login.html', role='developer')
+            
+            # Only allow the specific developer email
+            if email == 'mr.haider.sm.ali@gmail.com':
+                # Check if user exists
+                user = get_user_by_email(email)
+                
+                if user:
+                    # For existing user, either check password or reset if it's the default
+                    if password == 'password' or check_password_hash(user[2], password):
+                        # Login successful
+                        session['user_id'] = user[0]
+                        session['user_email'] = user[1]
+                        session['user_name'] = user[3]
+                        session['is_developer'] = True
+                        session['is_admin'] = True  # Developer also has admin privileges
+                        
+                        # If using default password, make sure hash is updated
+                        if password == 'password' and not check_password_hash(user[2], password):
+                            # Update password hash and role
+                            conn = sqlite3.connect('user_database.db')
+                            cursor = conn.cursor()
+                            password_hash = generate_password_hash(password)
+                            cursor.execute("UPDATE users SET password_hash = ?, role = 'developer' WHERE id = ?", 
+                                          (password_hash, user[0]))
+                            conn.commit()
+                            conn.close()
+                        else:
+                            # Just update role to developer
+                            conn = sqlite3.connect('user_database.db')
+                            cursor = conn.cursor()
+                            cursor.execute("UPDATE users SET role = 'developer' WHERE id = ?", (user[0],))
+                            conn.commit()
+                            conn.close()
+                        
+                        flash('Developer login successful', 'success')
+                        return redirect(url_for('developer_dashboard'))
+                    else:
+                        flash('Invalid password', 'error')
+                        return render_template('login.html', role='developer')
+                else:
+                    # Create new developer account with default password
+                    success, user_id = create_user(email, password, 'Developer', 'developer')
+                    if success:
+                        session['user_id'] = user_id
+                        session['user_email'] = email
+                        session['user_name'] = 'Developer'
+                        session['is_developer'] = True
+                        session['is_admin'] = True  # Developer also has admin privileges
+                        flash('Developer account created successfully', 'success')
+                        return redirect(url_for('developer_dashboard'))
+            else:
+                flash('Invalid developer credentials', 'error')
+                
+    # For GET request, render the login template
+    return render_template('login.html', role='developer')
 
 @app.route('/logout')
 def logout():
@@ -820,12 +1205,106 @@ def logout():
     flash('You have been logged out', 'info')
     return redirect(url_for('index'))
 
+@app.route('/refresh-token', methods=['POST'])
+def refresh_token():
+    """API endpoint to refresh a Firebase token in the session."""
+    try:
+        data = request.json
+        id_token = data.get('idToken')
+        
+        if not id_token:
+            return jsonify({'error': 'No ID token provided'}), 400
+            
+        # Verify token
+        success, uid, decoded_token = verify_firebase_token(id_token)
+        if not success:
+            return jsonify({'error': 'Invalid ID token'}), 401
+            
+        # Update token in session
+        session['firebase_token'] = id_token
+        
+        # Check if the user is still valid and has the appropriate role
+        if session.get('user_id'):
+            user_id = session.get('user_id')
+            
+            # Get user data
+            conn = sqlite3.connect('user_database.db')
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM users WHERE id = ? AND firebase_uid = ?", (user_id, uid))
+            user = cursor.fetchone()
+            conn.close()
+            
+            if not user:
+                # User no longer exists or firebase_uid mismatch
+                return jsonify({'error': 'User validation failed'}), 401
+                
+            # Update user role flags
+            if user[4] == 'admin':
+                session['is_admin'] = True
+            else:
+                session['is_admin'] = False
+                
+            if user[4] == 'developer':
+                session['is_developer'] = True
+                session['is_admin'] = True  # Developers are also admins
+            else:
+                session['is_developer'] = False
+        
+        return jsonify({'success': True})
+    except Exception as e:
+        print(f"Error refreshing token: {e}")
+        return jsonify({'error': str(e)}), 500
+
 # Admin routes
 @app.route('/admin/dashboard')
 @admin_required
 def admin_dashboard():
     """Admin dashboard."""
     return render_template('admin/dashboard.html')
+
+@app.route('/admin/topics')
+@admin_required
+def admin_topics():
+    """View all available AI teaching topics."""
+    # Get all topics from the curriculum
+    topics = []
+    for component, comp_data in OCR_CS_CURRICULUM.items():
+        comp_title = comp_data['title']
+        for topic in comp_data['topics']:
+            # Extract topic code (e.g., "1.2" from "1.2 Software and software development")
+            topic_parts = topic.split(' ', 1)
+            if len(topic_parts) == 2:
+                topic_code = topic_parts[0]
+                topics.append({
+                    'code': topic_code,
+                    'title': topic,
+                    'component': comp_title
+                })
+                
+                # Get subtopics
+                if topic_code in OCR_CS_DETAILED_TOPICS:
+                    for subtopic in OCR_CS_DETAILED_TOPICS[topic_code]['subtopics']:
+                        subtopic_parts = subtopic.split(' ', 1)
+                        if len(subtopic_parts) == 2:
+                            subtopic_code = subtopic_parts[0]
+                            topics.append({
+                                'code': subtopic_code,
+                                'title': subtopic,
+                                'component': comp_title,
+                                'parent': topic
+                            })
+    
+    # Sort topics by code
+    topics.sort(key=lambda x: x['code'])
+    
+    return render_template('admin/topics.html', topics=topics)
+
+# Developer routes
+@app.route('/developer/dashboard')
+@developer_required
+def developer_dashboard():
+    """Developer dashboard with access to all features."""
+    return render_template('admin/developer_dashboard.html')
 
 @app.route('/admin/resources')
 @admin_required
@@ -845,9 +1324,9 @@ def admin_cleanup_temp_files():
     return redirect(url_for('admin_dashboard'))
 
 @app.route('/admin/upload', methods=['GET', 'POST'])
-@admin_required
+@developer_required
 def admin_upload():
-    """Upload resources."""
+    """Upload resources (developer only)."""
     if request.method == 'POST':
         if 'file' not in request.files:
             flash('No file part', 'error')
@@ -1820,6 +2299,44 @@ def mark_topic_reviewed():
         # Update the topic progress with today's date
         today = datetime.now().strftime('%Y-%m-%d')
         
+        # Get a direct database connection to verify the update
+        conn = sqlite3.connect('ocr_cs_tutor.db')
+        cursor = conn.cursor()
+        
+        # First check if there's a user_id column in the topic_progress table
+        cursor.execute("PRAGMA table_info(topic_progress)")
+        columns = [col[1] for col in cursor.fetchall()]
+        has_user_id = 'user_id' in columns
+        
+        # Update directly with SQL to ensure it works
+        if has_user_id:
+            # If we have a user_id column, use it
+            cursor.execute(
+                """
+                UPDATE topic_progress 
+                SET last_studied = ? 
+                WHERE topic_code = ? AND user_id = ?
+                """, 
+                (today, topic_code, user_id)
+            )
+        else:
+            # Fallback to update without user_id
+            cursor.execute(
+                """
+                UPDATE topic_progress 
+                SET last_studied = ? 
+                WHERE topic_code = ?
+                """, 
+                (today, topic_code)
+            )
+        
+        rows_updated = cursor.rowcount
+        conn.commit()
+        conn.close()
+        
+        print(f"Updated topic {topic_code} for user {user_id}, rows affected: {rows_updated}")
+        
+        # Also try the ORM update as a backup
         try:
             # Try to update with user_id
             database.update_topic_progress(
@@ -1841,8 +2358,8 @@ def mark_topic_reviewed():
                     last_studied=today
                 )
             else:
-                # Re-raise if it's some other error
-                raise
+                # Log but don't re-raise since we already tried direct SQL update
+                print(f"ORM update failed but SQL update may have succeeded: {e}")
         
         # Also record this as an activity for streak tracking
         conn = sqlite3.connect('user_database.db')
@@ -1886,10 +2403,12 @@ def calculate_user_streak(user_id):
     # Get today's date and yesterday's date
     today = datetime.now().date()
     yesterday = today - timedelta(days=1)
+    two_days_ago = today - timedelta(days=2)
     
     # Format dates as strings
     today_str = today.strftime('%Y-%m-%d')
     yesterday_str = yesterday.strftime('%Y-%m-%d')
+    two_days_ago_str = two_days_ago.strftime('%Y-%m-%d')
     
     # Check if user has activity for today
     cursor.execute(
@@ -1905,9 +2424,16 @@ def calculate_user_streak(user_id):
     )
     has_activity_yesterday = cursor.fetchone() is not None
     
-    # Get all activity dates for this user in order
+    # Check if user has activity for two days ago
     cursor.execute(
-        "SELECT DISTINCT activity_date FROM user_activity WHERE user_id = ? ORDER BY activity_date ASC",
+        "SELECT 1 FROM user_activity WHERE user_id = ? AND activity_date = ?",
+        (user_id, two_days_ago_str)
+    )
+    has_activity_two_days_ago = cursor.fetchone() is not None
+    
+    # Get all activity dates for this user in descending order
+    cursor.execute(
+        "SELECT activity_date FROM user_activity WHERE user_id = ? ORDER BY activity_date DESC",
         (user_id,)
     )
     activity_dates = [datetime.strptime(row[0], '%Y-%m-%d').date() for row in cursor.fetchall()]
@@ -1918,55 +2444,77 @@ def calculate_user_streak(user_id):
     if not activity_dates:
         return {'streak': 0, 'streak_at_risk': False}
     
-    # Determine if streak is at risk
-    streak_at_risk = has_activity_yesterday and not has_activity_today
+    # Calculate streak
+    streak = 0
+    streak_at_risk = False
     
-    # Improved streak calculation - count consecutive days properly
-    streak = 1  # Start with 1 for the most recent activity
-    
-    # Group dates by consecutive days
-    consecutive_groups = []
-    current_group = [activity_dates[0]]
-    
-    for i in range(1, len(activity_dates)):
-        current_date = activity_dates[i]
-        prev_date = activity_dates[i-1]
-        
-        # Check if dates are consecutive (1 day apart)
-        if (current_date - prev_date).days == 1:
-            current_group.append(current_date)
-        else:
-            # Start a new group
-            consecutive_groups.append(current_group)
-            current_group = [current_date]
-    
-    # Add the last group
-    consecutive_groups.append(current_group)
-    
-    # Find the longest streak that includes the most recent activity
-    # The most recent activity is either today or should be connected to today
+    # If user has activity today, start counting from today
     if has_activity_today:
-        # If user has activity today, find the active streak
-        most_recent_date = today
-    else:
-        # If no activity today, get the most recent activity date
-        most_recent_date = max(activity_dates)
-    
-    # Find the group containing the most recent date or the date before it (if streak is at risk)
-    active_streak_group = None
-    for group in consecutive_groups:
-        if most_recent_date in group or (streak_at_risk and yesterday in group):
-            active_streak_group = group
-            break
-    
-    # Calculate streak from the active group
-    if active_streak_group:
-        streak = len(active_streak_group)
-    else:
-        # If no active group (should not happen), default to 1
         streak = 1
+        date_to_check = yesterday
+    # If user has activity yesterday but not today, start counting from yesterday
+    # and mark streak as at risk
+    elif has_activity_yesterday:
+        streak = 1
+        date_to_check = two_days_ago
+        streak_at_risk = True
+    # If user has activity two days ago but not yesterday or today,
+    # streak is 0 (streak was broken)
+    else:
+        return {'streak': 0, 'streak_at_risk': False}
+    
+    # Continue counting streak from previous days
+    for date in activity_dates:
+        if date == today or date == yesterday:
+            # Skip today and yesterday as they were already counted
+            continue
+            
+        if date == date_to_check:
+            streak += 1
+            date_to_check = date_to_check - timedelta(days=1)
+        else:
+            # Allow for one missed day in the streak
+            if date == date_to_check - timedelta(days=1) and not streak_at_risk:
+                streak_at_risk = True
+                date_to_check = date - timedelta(days=1)
+            else:
+                # Streak is broken
+                break
     
     return {'streak': streak, 'streak_at_risk': streak_at_risk}
+
+@app.route('/get-profile-picture', methods=['GET'])
+@login_required
+def get_profile_picture():
+    """Get the profile picture URL for the logged-in user."""
+    user_id = session.get('user_id')
+    
+    if not user_id:
+        return jsonify({'error': 'User not authenticated'}), 401
+    
+    try:
+        # Get user data
+        conn = sqlite3.connect('user_database.db')
+        cursor = conn.cursor()
+        cursor.execute("SELECT profile_picture_url FROM users WHERE id = ?", (user_id,))
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result and result[0]:
+            # Return profile picture URL if found
+            return jsonify({
+                'success': True,
+                'profile_picture_url': result[0]
+            })
+        else:
+            # No profile picture found
+            return jsonify({
+                'success': False,
+                'message': 'No profile picture found'
+            })
+    except Exception as e:
+        print(f"Error getting profile picture: {str(e)}")
+        return jsonify({'error': f'Error getting profile picture: {str(e)}'}), 500
 
 @app.route('/student/delete-pdf', methods=['POST'])
 @login_required

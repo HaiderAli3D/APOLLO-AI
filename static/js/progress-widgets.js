@@ -415,9 +415,8 @@ function markTopicAsReviewed(topicCode) {
                 console.error('Max retries reached. Giving up.');
                 handleError(error);
                 
-                // Even if server update fails, we can still update the UI optimistically
-                // This ensures the user experience is not broken by network issues
-                handleSuccess();
+            // Do not update UI optimistically on real failure
+            // Let the user know there was an error instead
             }
         });
     }

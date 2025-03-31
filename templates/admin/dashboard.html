@@ -13,8 +13,7 @@
         <nav class="admin-nav">
             <ul>
                 <li><a href="{{ url_for('admin_dashboard') }}" class="active">Dashboard</a></li>
-                <li><a href="{{ url_for('admin_resources') }}">Resources</a></li>
-                <li><a href="{{ url_for('admin_upload') }}">Upload</a></li>
+                <li><a href="{{ url_for('admin_topics') }}">Topics</a></li>
                 <li><a href="{{ url_for('logout') }}">Logout</a></li>
             </ul>
         </nav>
@@ -26,15 +25,9 @@
                 
                 <div class="dashboard-cards">
                     <div class="dashboard-card">
-                        <h3>Resource Management</h3>
-                        <p>View and manage learning resources for the OCR A-Level Computer Science curriculum.</p>
-                        <a href="{{ url_for('admin_resources') }}" class="btn btn-primary">View Resources</a>
-                    </div>
-                    
-                    <div class="dashboard-card">
-                        <h3>Upload New Resources</h3>
-                        <p>Add new learning materials to enhance the AI tutor's knowledge base.</p>
-                        <a href="{{ url_for('admin_upload') }}" class="btn btn-primary">Upload Files</a>
+                        <h3>AI Teaching Topics</h3>
+                        <p>Explore the topics and subtopics that the AI can teach to students.</p>
+                        <a href="{{ url_for('admin_topics') }}" class="btn btn-primary">View Topics</a>
                     </div>
                     
                     <div class="dashboard-card">
@@ -42,18 +35,17 @@
                         <p>System maintenance tools and cleanup operations.</p>
                         <a href="{{ url_for('admin_cleanup_temp_files') }}" class="btn btn-warning">Clean Temp Files</a>
                     </div>
-                    
                 </div>
                 
                 <div class="admin-instructions">
                     <h3>Admin Instructions</h3>
                     <p>As an administrator, you can:</p>
                     <ul>
-                        <li>Upload PDF files, text documents, and other learning resources</li>
-                        <li>View and manage existing resources</li>
-                        <li>Monitor the knowledge base coverage across the OCR curriculum</li>
+                        <li>Explore all AI teaching topics and subtopics available to students</li>
+                        <li>Monitor the topics coverage across the OCR curriculum</li>
+                        <li>Perform system maintenance and cleanup operations</li>
                     </ul>
-                    <p>The system will automatically process uploaded files and extract relevant information for the AI tutor to use when responding to student queries.</p>
+                    <p>This administrator dashboard provides oversight of the AI teaching capabilities without the ability to modify the knowledge base.</p>
                 </div>
             </main>
             

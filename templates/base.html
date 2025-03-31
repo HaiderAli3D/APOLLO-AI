@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}APOLLO AI{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <style>
+        /* Header layout styles */
+        .header-content {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            width: 100%;
+        }
+        
+        .header-left {
+            flex: 1;
+        }
+        
+        .header-right {
+            display: flex;
+            align-items: center;
+            margin-right: 20px;
+        }
+        
+        /* User profile styles */
+        .user-profile {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .user-name {
+            color: white;
+            font-weight: bold;
+        }
+        
+        .profile-picture {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            overflow: hidden;
+            background-color: #4a7feb;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+        }
+        
+        #profile-avatar {
+            color: white;
+            font-weight: bold;
+            font-size: 20px;
+        }
+        
+        #profile-picture {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+    </style>
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <header>
+        <div class="header-content">
+            <div class="header-left">
+                <h1>APOLLO AI</h1>
+                <p>{% block header_subtitle %}Your full time professional private tutor for OCR A-Level Computer Science{% endblock %}</p>
+            </div>
+            <div class="header-right">
+                {% if session.get('user_id') %}
+                    <div class="user-profile">
+                        {% if session.get('user_name') %}
+                            <span class="user-name">{{ session.get('user_name') }}</span>
+                        {% endif %}
+                        <div class="profile-picture" id="profile-picture-container">
+                            <div id="profile-avatar">
+                                {% if session.get('user_name') %}
+                                    {{ session.get('user_name')[0] | upper }}
+                                {% else %}
+                                    U
+                                {% endif %}
+                            </div>
+                            <img id="profile-picture" style="display: none;" alt="Profile">
+                        </div>
+                    </div>
+                {% endif %}
+            </div>
+        </div>
+    </header>
+    
+    <div class="container">
+        <main>
+            {% block content %}{% endblock %}
+        </main>
+        
+        <footer>
+            <p>&copy; 2025 APOLLO AI - Your full time professional private tutor for OCR A-Level Computer Science</p>
+        </footer>
+    </div>
+
+    <!-- Firebase SDK (non-modular version required for Firebase UI) -->
+    <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-analytics-compat.js"></script>
+    
+    <script>
+        // Your web app's Firebase configuration
+        const firebaseConfig = {
+            apiKey: "AIzaSyBVLWsgEgQxBKDpQ4a7nb-CKhMf-ZEwnmA",
+            authDomain: "apollo-auth-753b5.firebaseapp.com",
+            projectId: "apollo-auth-753b5",
+            storageBucket: "apollo-auth-753b5.firebasestorage.app",
+            messagingSenderId: "233177806452",
+            appId: "1:233177806452:web:189d47b01c3de6e8110321",
+            measurementId: "G-DJXDJWE6PJ"
+        };
+        
+        // Initialize Firebase
+        firebase.initializeApp(firebaseConfig);
+        firebase.analytics();
+    </script>
+    
+    <!-- Custom Firebase Authentication Utilities -->
+    <script src="{{ url_for('static', filename='js/firebase-auth.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/firebase-token-manager.js') }}"></script>
+    
+    <script>
+        // Attempt to load user profile picture
+        document.addEventListener('DOMContentLoaded', function() {
+            // Only run if user is logged in
+            {% if session.get('user_id') %}
+                // Function to update profile picture
+                async function updateProfilePicture() {
+                    try {
+                        // Check if there's a user in Firebase
+                        const currentUser = window.firebaseAuth.getCurrentUser();
+                        if (currentUser) {
+                            // Get user profile photo URL
+                            let photoURL = currentUser.photoURL;
+                            const profilePicture = document.getElementById('profile-picture');
+                            const profileAvatar = document.getElementById('profile-avatar');
+                            
+                            // If user has a profile picture from Google or other provider
+                            if (photoURL) {
+                                profilePicture.src = photoURL;
+                                profilePicture.style.display = 'block';
+                                profileAvatar.style.display = 'none';
+                            } else {
+                                // Check if we have one stored in our database
+                                try {
+                                    const response = await fetch('/get-profile-picture');
+                                    const data = await response.json();
+                                    
+                                    if (data.success && data.profile_picture_url) {
+                                        profilePicture.src = data.profile_picture_url;
+                                        profilePicture.style.display = 'block';
+                                        profileAvatar.style.display = 'none';
+                                    }
+                                } catch (error) {
+                                    console.error('Error fetching profile picture from server:', error);
+                                    // If there's an error, just show the default avatar
+                                    profilePicture.style.display = 'none';
+                                    profileAvatar.style.display = 'flex';
+                                }
+                            }
+                        }
+                    } catch (error) {
+                        console.error('Error updating profile picture:', error);
+                    }
+                }
+                
+                // Check if Firebase Auth is initialized
+                if (typeof window.firebaseAuth !== 'undefined') {
+                    updateProfilePicture();
+                } else {
+                    // Wait for Firebase Auth to initialize
+                    const checkInterval = setInterval(function() {
+                        if (typeof window.firebaseAuth !== 'undefined') {
+                            clearInterval(checkInterval);
+                            updateProfilePicture();
+                        }
+                    }, 100);
+                }
+            {% endif %}
+        });
+    </script>
+    
+    {% block scripts %}{% endblock %}
+</body>
+</html>

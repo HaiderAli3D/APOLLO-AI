@@ -6,4 +6,5 @@ markdown
 gunicorn
 rich
 pyrebase
+firebase-admin
 werkzeug

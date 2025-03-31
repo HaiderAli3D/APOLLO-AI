@@ -6,3 +6,20 @@ __pycache__/
 venv/
 .DS_Store
 temp_uploads/
+
+# Firebase service account key (contains sensitive credentials)
+apollo-auth-753b5-firebase-adminsdk-fbsvc-6b6d2904d5.json
+*-firebase-adminsdk-*.json
+
+# Generated content
+static/generated_pdfs/
+temp_latex/
+
+# IDE settings
+.idea/
+.vscode/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/

@@ -1,54 +1,471 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin Login - APOLLO AI for OCR A-Level Computer Science</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
-</head>
-<body>
-    <header>
-        <h1>APOLLO AI</h1>
-        <p>Admin Login - Your full time professional private tutor for OCR A-Level Computer Science</p>
-    </header>
+{% extends "base.html" %}
+
+{% block title %}{% if role == 'developer' %}Developer{% else %}Admin{% endif %} Login - APOLLO AI{% endblock %}
+
+{% block content %}
+<style>
+    .login-container {
+        max-width: 400px;
+        margin: 0 auto;
+        padding: 2rem;
+        background-color: #f8f9fa;
+        border-radius: 8px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
     
-    <div class="container">
-        <main class="login-page">
-            <div class="login-form-container">
-                <h2>Admin Login</h2>
-                
-                {% with messages = get_flashed_messages(with_categories=true) %}
-                    {% if messages %}
-                        {% for category, message in messages %}
-                            <div class="alert alert-{{ category }}">{{ message }}</div>
-                        {% endfor %}
-                    {% endif %}
-                {% endwith %}
-                
-                <form method="POST" action="{{ url_for('login') }}" class="login-form">
-                    <div class="form-group">
-                        <label for="username">Username:</label>
-                        <input type="text" id="username" name="username" required>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label for="password">Password:</label>
-                        <input type="password" id="password" name="password" required>
-                    </div>
-                    
-                    <div class="form-actions">
-                        <button type="submit" class="btn btn-primary">Login</button>
-                        <a href="{{ url_for('index') }}" class="btn btn-secondary">Back to Sign Out</a>
-                    </div>
-                </form>
+    .form-group {
+        margin-bottom: 1rem;
+    }
+    
+    .form-group label {
+        display: block;
+        margin-bottom: 0.5rem;
+        font-weight: 500;
+    }
+    
+    .form-group input {
+        width: 100%;
+        padding: 0.75rem;
+        border: 1px solid #ced4da;
+        border-radius: 4px;
+    }
+    
+    .btn-login {
+        width: 100%;
+        padding: 0.75rem;
+        background-color: #4a7feb;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-weight: 500;
+        margin-top: 1rem;
+    }
+    
+    .btn-login:hover {
+        background-color: #3a6cd8;
+    }
+    
+    .login-options {
+        display: flex;
+        justify-content: center;
+        margin: 2rem 0;
+        gap: 1rem;
+    }
+    
+    .login-option {
+        padding: 0.75rem 1.25rem;
+        background-color: #f8f9fa;
+        border: 1px solid #ced4da;
+        border-radius: 4px;
+        text-decoration: none;
+        color: #212529;
+        font-weight: 500;
+    }
+    
+    .login-option.active {
+        background-color: #4a7feb;
+        color: white;
+        border-color: #4a7feb;
+    }
+    
+    .flashes {
+        margin-bottom: 1rem;
+    }
+    
+    .flash-message {
+        padding: 0.75rem;
+        border-radius: 4px;
+        margin-bottom: 0.5rem;
+    }
+    
+    .flash-message.error {
+        background-color: #f8d7da;
+        color: #721c24;
+        border: 1px solid #f5c6cb;
+    }
+    
+    .flash-message.success {
+        background-color: #d4edda;
+        color: #155724;
+        border: 1px solid #c3e6cb;
+    }
+</style>
+
+<div class="login-options">
+    <a href="{{ url_for('admin_login') }}" class="login-option {% if role != 'developer' %}active{% endif %}">Admin Login</a>
+    <a href="{{ url_for('developer_login') }}" class="login-option {% if role == 'developer' %}active{% endif %}">Developer Login</a>
+    <a href="{{ url_for('index') }}" class="login-option">Back to Home</a>
+</div>
+
+<div class="login-container">
+    <h2>{% if role == 'developer' %}Developer{% else %}Admin{% endif %} Login</h2>
+    
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            <div class="flashes">
+                {% for category, message in messages %}
+                    <div class="flash-message {{ category }}">{{ message }}</div>
+                {% endfor %}
             </div>
-        </main>
-        
-        <footer>
-            <p>&copy; 2025 APOLLO AI - Your full time professional private tutor for OCR A-Level Computer Science</p>
-        </footer>
+        {% endif %}
+    {% endwith %}
+    
+    <div id="login-error" class="flash-message error" style="display: none;"></div>
+    <div id="auth-message-container"></div>
+    
+    <!-- Firebase Authentication UI container -->
+    <div id="firebaseui-auth-container"></div>
+    
+    <div class="auth-divider">
+        <span>OR</span>
     </div>
     
-    <!-- No global chat on login page -->
-</body>
-</html>
+    <!-- Traditional login form -->
+    <form id="traditional-login-form">
+        <div class="form-group">
+            <label for="email">Email Address</label>
+            <input type="email" id="email" name="email" required>
+        </div>
+        
+        <div class="form-group">
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" required>
+        </div>
+        
+        <button type="submit" class="btn-login">Sign In with Password</button>
+    </form>
+</div>
+
+<style>
+    .auth-divider {
+        display: flex;
+        align-items: center;
+        text-align: center;
+        margin: 20px 0;
+    }
+    
+    .auth-divider::before,
+    .auth-divider::after {
+        content: '';
+        flex: 1;
+        border-bottom: 1px solid #e0e0e0;
+    }
+    
+    .auth-divider span {
+        padding: 0 10px;
+        color: #666;
+        font-size: 14px;
+    }
+    
+    /* Firebase UI customization */
+    .firebaseui-container {
+        max-width: 100% !important;
+        font-family: inherit !important;
+    }
+    
+    .firebaseui-card-content {
+        padding: 0 !important;
+    }
+    
+    .firebaseui-idp-button {
+        max-width: 100% !important;
+        border-radius: 4px !important;
+    }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<!-- Firebase UI Script -->
+<script src="https://www.gstatic.com/firebasejs/ui/6.0.1/firebase-ui-auth.js"></script>
+<link type="text/css" rel="stylesheet" href="https://www.gstatic.com/firebasejs/ui/6.0.1/firebase-ui-auth.css" />
+
+<script type="module">
+document.addEventListener('DOMContentLoaded', function() {
+    const traditionalLoginForm = document.getElementById('traditional-login-form');
+    const errorDiv = document.getElementById('login-error');
+    const authMessageContainer = document.getElementById('auth-message-container');
+    
+    // Initialize Firebase UI
+    initFirebaseUI();
+    
+    // Traditional form login handler
+    traditionalLoginForm.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        
+        const email = document.getElementById('email').value;
+        const password = document.getElementById('password').value;
+        
+        // Hide any previous error messages
+        errorDiv.style.display = 'none';
+        
+        try {
+            // Show loading state
+            const submitButton = traditionalLoginForm.querySelector('button[type="submit"]');
+            const originalText = submitButton.textContent;
+            submitButton.disabled = true;
+            submitButton.textContent = 'Signing in...';
+            
+            // Use our enhanced signIn function with proper error handling
+            const userCredential = await window.firebaseAuth.signIn(email, password, authMessageContainer);
+            
+            // Handle successful login
+            await handleFirebaseSignIn(userCredential.user);
+            
+            // Restore button state (in case of error)
+            submitButton.disabled = false;
+            submitButton.textContent = originalText;
+        } catch (error) {
+            console.error('Login error:', error);
+            
+            // If this is a specific error we want to handle specially
+            if (error.code === 'auth/user-not-found') {
+                showAuthError('No admin account found with this email. Admin access is restricted.', authMessageContainer);
+            } else if (error.code === 'auth/wrong-password') {
+                showPasswordResetOption(email, authMessageContainer);
+            }
+            
+            // Restore form button
+            const submitButton = traditionalLoginForm.querySelector('button[type="submit"]');
+            if (submitButton.disabled) {
+                submitButton.disabled = false;
+                submitButton.textContent = 'Sign In with Password';
+            }
+        }
+    });
+    
+    // Show password reset option
+    function showPasswordResetOption(email, container) {
+        const resetDiv = document.createElement('div');
+        resetDiv.className = 'password-reset-option';
+        resetDiv.innerHTML = `
+            <div class="flash-message" style="background-color: #e2f0fb; color: #0c5460; border: 1px solid #bee5eb;">
+                <p>Forgot your password? Would you like to reset it?</p>
+                <button id="reset-password-btn" style="background-color: #4a7feb; color: white; border: none; padding: 8px 12px; border-radius: 4px; margin-right: 10px; cursor: pointer;">Reset Password</button>
+                <button id="dismiss-reset-btn" style="background-color: transparent; border: 1px solid #6c757d; color: #6c757d; padding: 8px 12px; border-radius: 4px; cursor: pointer;">Dismiss</button>
+            </div>
+        `;
+        
+        // Remove any existing reset options
+        const existingResetOption = container.querySelector('.password-reset-option');
+        if (existingResetOption) {
+            existingResetOption.remove();
+        }
+        
+        // Add to container
+        container.appendChild(resetDiv);
+        
+        // Add event listener for reset button
+        document.getElementById('reset-password-btn').addEventListener('click', async () => {
+            try {
+                await window.firebaseAuth.sendPasswordResetEmail(email, container);
+                resetDiv.remove();
+            } catch (error) {
+                // Error is already displayed by the sendPasswordResetEmail function
+                console.error('Password reset error:', error);
+            }
+        });
+        
+        // Add event listener for dismiss button
+        document.getElementById('dismiss-reset-btn').addEventListener('click', () => {
+            resetDiv.remove();
+        });
+    }
+    
+    // Helper functions for auth messaging
+    function showAuthError(message, container = null) {
+        console.error('Auth error:', message);
+        
+        if (container) {
+            // Create error div with proper styling
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'flash-message error';
+            errorDiv.textContent = message;
+            
+            // Clear previous errors
+            const existingErrors = container.querySelectorAll('.flash-message.error');
+            existingErrors.forEach(el => el.remove());
+            
+            // Add to container
+            container.appendChild(errorDiv);
+            
+            // Auto-dismiss after 10 seconds
+            setTimeout(() => {
+                if (errorDiv.parentNode) {
+                    errorDiv.style.opacity = '0';
+                    errorDiv.style.transition = 'opacity 0.5s';
+                    setTimeout(() => errorDiv.remove(), 500);
+                }
+            }, 10000);
+        } else {
+            // Fallback
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+        }
+    }
+    
+    function showAuthSuccess(message, container = null) {
+        console.log('Auth success:', message);
+        
+        if (container) {
+            const successDiv = document.createElement('div');
+            successDiv.className = 'flash-message success';
+            successDiv.textContent = message;
+            
+            // Clear previous success messages
+            const existingSuccess = container.querySelectorAll('.flash-message.success');
+            existingSuccess.forEach(el => el.remove());
+            
+            // Add to container
+            container.appendChild(successDiv);
+            
+            // Auto-dismiss after 5 seconds
+            setTimeout(() => {
+                if (successDiv.parentNode) {
+                    successDiv.style.opacity = '0';
+                    successDiv.style.transition = 'opacity 0.5s';
+                    setTimeout(() => successDiv.remove(), 500);
+                }
+            }, 5000);
+        }
+    }
+    
+    // Initialize Firebase UI Widget with better error handling
+    function initFirebaseUI() {
+        // Initialize the FirebaseUI Widget using Firebase
+        const ui = new firebaseui.auth.AuthUI(firebase.auth());
+        
+        // Configure Firebase UI
+        const uiConfig = {
+            callbacks: {
+                signInSuccessWithAuthResult: function(authResult) {
+                    // User successfully signed in
+                    handleFirebaseSignIn(authResult.user);
+                    return false; // Don't redirect automatically
+                },
+                signInFailure: function(error) {
+                    // Handle specific error cases
+                    console.error('Firebase UI error:', error);
+                    
+                    // Show the error in our custom error container
+                    showAuthError(getFirebaseErrorMessage(error.code) || error.message, authMessageContainer);
+                    
+                    return Promise.resolve();
+                },
+                uiShown: function() {
+                    // The widget is rendered
+                }
+            },
+            // Will use popup for IDP Providers sign-in flow
+            signInFlow: 'popup',
+            signInOptions: [
+                // Email/Password Provider
+                {
+                    provider: firebase.auth.EmailAuthProvider.PROVIDER_ID,
+                    requireDisplayName: false
+                },
+                // Google Sign-In (for admins who authenticate with Google)
+                firebase.auth.GoogleAuthProvider.PROVIDER_ID,
+                // Only for admin login, we're being more restrictive about providers
+            ],
+            // Terms of service URL
+            tosUrl: '#',
+            // Privacy policy URL
+            privacyPolicyUrl: '#'
+        };
+        
+        // The start method will wait until the DOM is loaded
+        ui.start('#firebaseui-auth-container', uiConfig);
+    }
+    
+    function getFirebaseErrorMessage(errorCode) {
+        const errorMessages = {
+            'auth/user-not-found': 'No admin account found with this email. Admin access is restricted.',
+            'auth/wrong-password': 'Incorrect password. Please try again or use the password reset option.',
+            'auth/invalid-email': 'The email address is not valid. Please check and try again.',
+            'auth/user-disabled': 'This account has been disabled. Please contact support.',
+            'auth/account-exists-with-different-credential': 'An account already exists with the same email but different sign-in credentials.',
+            'auth/operation-not-allowed': 'This operation is not allowed.',
+            'auth/requires-recent-login': 'This operation requires re-authentication. Please sign in again.',
+            'default': 'An authentication error occurred. Please try again later.'
+        };
+        
+        return errorMessages[errorCode] || errorMessages['default'];
+    }
+    
+    // Handle Firebase Sign-In
+    async function handleFirebaseSignIn(user) {
+        try {
+            // Hide previous errors
+            errorDiv.style.display = 'none';
+            
+            // Show loading message
+            showAuthSuccess('Verifying admin/developer credentials...', authMessageContainer);
+            
+            // Get the user's email to check if it's allowed for admin access
+            const email = user.email;
+            
+            {% if role == 'developer' %}
+            // Check if this is a developer email (example check)
+            if (!email.endsWith('@dev.ocrcstutor.com') && email !== 'mr.haider.sm.ali@gmail.com') {
+                showAuthError('This account does not have developer privileges.', authMessageContainer);
+                return;
+            }
+            {% else %}
+            // Check if this is an admin email (example check)
+            if (!email.endsWith('@admin.ocrcstutor.com') && email !== 'mr.haider.sm.ali@gmail.com') {
+                showAuthError('This account does not have admin privileges.', authMessageContainer);
+                return;
+            }
+            {% endif %}
+            
+            // Get the Firebase ID token
+            const idToken = await user.getIdToken();
+            
+            // Send the token to the backend
+            const response = await fetch('{% if role == "developer" %}{{ url_for("developer_login") }}{% else %}{{ url_for("admin_login") }}{% endif %}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ idToken: idToken }),
+            });
+            
+            const data = await response.json();
+            
+            if (data.success) {
+                showAuthSuccess('Login successful! Redirecting...', authMessageContainer);
+                setTimeout(() => {
+                    window.location.href = data.redirect;
+                }, 500);
+            } else {
+                showAuthError(data.error || 'An unknown error occurred', authMessageContainer);
+            }
+        } catch (error) {
+            console.error('Authentication error:', error);
+            showAuthError(error.message || 'Authentication failed. Please check your credentials.', authMessageContainer);
+        }
+    }
+    
+    // Check URL for email parameter (for registration redirect)
+    function checkUrlForEmail() {
+        const urlParams = new URLSearchParams(window.location.search);
+        const email = urlParams.get('email');
+        if (email) {
+            document.getElementById('email').value = email;
+        }
+    }
+    
+    // Call function to check URL for email parameter
+    checkUrlForEmail();
+    
+    // Listen for auth state changes
+    firebase.auth().onAuthStateChanged(function(user) {
+        if (user) {
+            // User is signed in, but we'll let the signInSuccess callback handle it
+            // This prevents automatic login for normal users
+        }
+    });
+});
+</script>
+{% endblock %}

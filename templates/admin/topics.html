@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Teaching Topics - APOLLO AI</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <style>
+        .topics-container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        .topics-list {
+            margin-top: 2rem;
+        }
+        
+        .topic-section {
+            margin-bottom: 2rem;
+            background-color: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            padding: 1.5rem;
+        }
+        
+        .topic-section h3 {
+            margin-top: 0;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid #e0e0e0;
+            color: #4a7feb;
+            font-size: 1.4rem;
+        }
+        
+        .topic-item {
+            padding: 0.75rem;
+            border-radius: 4px;
+            margin-bottom: 0.5rem;
+            transition: background-color 0.2s;
+            display: flex;
+            align-items: flex-start;
+        }
+        
+        .topic-item:hover {
+            background-color: #f8f9fa;
+        }
+        
+        .topic-code {
+            font-weight: bold;
+            color: #4a7feb;
+            display: inline-block;
+            min-width: 60px;
+            margin-right: 10px;
+        }
+        
+        .topic-title {
+            flex: 1;
+        }
+        
+        .subtopic {
+            margin-left: 2rem;
+            position: relative;
+        }
+        
+        .subtopic:before {
+            content: '↳';
+            position: absolute;
+            left: -1.5rem;
+            color: #6c757d;
+        }
+        
+        .component-title {
+            color: #6c757d;
+            font-size: 0.9rem;
+            margin-left: 0.5rem;
+        }
+        
+        .search-box {
+            width: 100%;
+            padding: 0.75rem;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            margin-bottom: 1rem;
+            font-size: 1rem;
+        }
+        
+        .topic-count {
+            text-align: right;
+            color: #6c757d;
+            font-size: 0.9rem;
+            margin-bottom: 0.5rem;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>APOLLO AI</h1>
+        <p>{% if session.get('is_developer') %}Developer Dashboard{% else %}Admin Dashboard{% endif %} - Your full time professional private tutor for OCR A-Level Computer Science</p>
+        <nav class="admin-nav">
+            <ul>
+                <li><a href="{% if session.get('is_developer') %}{{ url_for('developer_dashboard') }}{% else %}{{ url_for('admin_dashboard') }}{% endif %}">Dashboard</a></li>
+                {% if session.get('is_developer') %}
+                <li><a href="{{ url_for('admin_resources') }}">Resources</a></li>
+                {% endif %}
+                <li><a href="{{ url_for('admin_topics') }}" class="active">Topics</a></li>
+                {% if session.get('is_developer') %}
+                <li><a href="{{ url_for('admin_upload') }}">Upload</a></li>
+                {% endif %}
+                <li><a href="{{ url_for('logout') }}">Logout</a></li>
+            </ul>
+        </nav>
+    </header>
+    
+    <div class="container">
+        <main>
+            <div class="topics-container">
+                <h2>AI Teaching Topics</h2>
+                <p>This page shows all topics and subtopics the AI tutor can teach based on the OCR A-Level Computer Science curriculum.</p>
+                
+                <input type="text" id="topic-search" class="search-box" placeholder="Search for topics...">
+                
+                <div class="topic-count">
+                    Showing <span id="showing-count">{{ topics|length }}</span> out of <span id="total-count">{{ topics|length }}</span> topics
+                </div>
+                
+                <div class="topics-list">
+                    <!-- Group topics by component first -->
+                    {% set components = {} %}
+                    {% for topic in topics %}
+                        {% if topic.component not in components %}
+                            {% set _ = components.update({topic.component: []}) %}
+                        {% endif %}
+                        {% set _ = components[topic.component].append(topic) %}
+                    {% endfor %}
+                    
+                    <!-- Now render topics by component -->
+                    {% for component, component_topics in components.items() %}
+                        <div class="topic-section">
+                            <h3>{{ component }}</h3>
+                            {% for topic in component_topics %}
+                                <div class="topic-item {% if topic.parent is defined %}subtopic{% endif %}" data-search="{{ topic.code }} {{ topic.title|lower }}">
+                                    <span class="topic-code">{{ topic.code }}</span>
+                                    <span class="topic-title">{{ topic.title.split(topic.code + ' ', 1)[-1] }}</span>
+                                    {% if topic.parent is defined %}
+                                        <span class="component-title">({{ topic.parent.split(topic.parent.split(' ')[0] + ' ', 1)[-1] }})</span>
+                                    {% endif %}
+                                </div>
+                            {% endfor %}
+                        </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </main>
+        
+        <footer>
+            <p>&copy; 2025 APOLLO AI - Your full time professional private tutor for OCR A-Level Computer Science</p>
+        </footer>
+    </div>
+    
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const searchBox = document.getElementById('topic-search');
+            const topicItems = document.querySelectorAll('.topic-item');
+            const showingCount = document.getElementById('showing-count');
+            const totalCount = document.getElementById('total-count');
+            
+            searchBox.addEventListener('input', function() {
+                const searchTerm = this.value.toLowerCase();
+                let visibleCount = 0;
+                
+                topicItems.forEach(function(item) {
+                    const searchData = item.getAttribute('data-search').toLowerCase();
+                    if (searchTerm === '' || searchData.includes(searchTerm)) {
+                        item.style.display = '';
+                        visibleCount++;
+                    } else {
+                        item.style.display = 'none';
+                    }
+                });
+                
+                showingCount.textContent = visibleCount;
+            });
+        });
+    </script>
+</body>
+</html>

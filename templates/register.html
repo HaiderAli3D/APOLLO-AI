@@ -1,62 +1,377 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sign Up - APOLLO AI for OCR A-Level Computer Science</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
-</head>
-<body>
-    <header>
-        <h1>APOLLO AI</h1>
-        <p>Register - Your full time professional private tutor for OCR A-Level Computer Science</p>
-    </header>
-    
-    <div class="container">
-        <main class="login-page">
-            <div class="login-form-container">
-                <h2>Create an Account</h2>
-                
-                {% with messages = get_flashed_messages(with_categories=true) %}
-                    {% if messages %}
-                        {% for category, message in messages %}
-                            <div class="alert alert-{{ category }}">{{ message }}</div>
-                        {% endfor %}
-                    {% endif %}
-                {% endwith %}
-                
-                <form method="POST" action="{{ url_for('register') }}" class="login-form">
-                    <div class="form-group">
-                        <label for="full_name">Full Name:</label>
-                        <input type="text" id="full_name" name="full_name" required>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label for="email">Email:</label>
-                        <input type="email" id="email" name="email" required>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label for="password">Password:</label>
-                        <input type="password" id="password" name="password" required>
-                        <span class="form-help">Password must be at least 8 characters long</span>
-                    </div>
-                    
-                    <div class="form-actions">
-                        <button type="submit" class="btn btn-primary">Sign Up</button>
-                        <a href="{{ url_for('index') }}" class="btn btn-secondary">Back to Sign Out</a>
-                    </div>
-                </form>
-                
-                <p class="login-link">
-                    Already have an account? <a href="{{ url_for('student_login') }}">Log in here</a>
-                </p>
-            </div>
-        </main>
+{% extends "base.html" %}
+
+{% block title %}Sign Up - APOLLO AI for OCR A-Level Computer Science{% endblock %}
+
+{% block header_subtitle %}Register - Your full time professional private tutor for OCR A-Level Computer Science{% endblock %}
+
+{% block content %}
+<div class="login-page">
+    <div class="login-form-container">
+        <h2>Create an Account</h2>
         
-        <footer>
-            <p>&copy; 2025 APOLLO AI - Your full time professional private tutor for OCR A-Level Computer Science</p>
-        </footer>
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+        
+        <div id="register-error" class="alert alert-error" style="display: none;"></div>
+        
+        <!-- Firebase Authentication UI container -->
+        <div id="firebaseui-auth-container"></div>
+        <div id="loader">Loading...</div>
+        
+        <div class="auth-divider">
+            <span>OR</span>
+        </div>
+        
+        <form id="manual-register-form" class="login-form">
+            <div class="form-group">
+                <label for="full_name">Full Name:</label>
+                <input type="text" id="full_name" name="full_name" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="email">Email:</label>
+                <input type="email" id="email" name="email" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="password">Password:</label>
+                <input type="password" id="password" name="password" required>
+                <span class="form-help">Password must be at least 8 characters long</span>
+            </div>
+            
+            <div class="form-actions">
+                <button type="submit" class="btn btn-primary">Sign Up</button>
+                <a href="{{ url_for('index') }}" class="btn btn-secondary">Back to Home</a>
+            </div>
+        </form>
+        
+        <p class="login-link">
+            Already have an account? <a href="{{ url_for('student_login') }}">Log in here</a>
+        </p>
     </div>
-</body>
-</html>
+</div>
+
+<style>
+    .auth-divider {
+        display: flex;
+        align-items: center;
+        text-align: center;
+        margin: 20px 0;
+    }
+    
+    .auth-divider::before,
+    .auth-divider::after {
+        content: '';
+        flex: 1;
+        border-bottom: 1px solid #e0e0e0;
+    }
+    
+    .auth-divider span {
+        padding: 0 10px;
+        color: #666;
+        font-size: 14px;
+    }
+    
+    /* Firebase UI customization */
+    .firebaseui-container {
+        max-width: 100% !important;
+        font-family: inherit !important;
+    }
+    
+    .firebaseui-card-content {
+        padding: 0 !important;
+    }
+    
+    .firebaseui-idp-button {
+        max-width: 100% !important;
+        border-radius: 4px !important;
+    }
+    
+    #loader {
+        text-align: center;
+        margin: 10px 0;
+        display: none;
+    }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<!-- Firebase UI Script -->
+<script src="https://www.gstatic.com/firebasejs/ui/6.0.1/firebase-ui-auth.js"></script>
+<link type="text/css" rel="stylesheet" href="https://www.gstatic.com/firebasejs/ui/6.0.1/firebase-ui-auth.css" />
+
+<script type="module">
+document.addEventListener('DOMContentLoaded', function() {
+    const manualRegisterForm = document.getElementById('manual-register-form');
+    const errorDiv = document.getElementById('register-error');
+    
+    // Initialize Firebase UI
+    initFirebaseUI();
+    
+    // Create auth error container for displaying nicely formatted error messages
+    const authErrorContainer = document.querySelector('.login-form-container');
+    
+    // Manual registration form handler
+    manualRegisterForm.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        
+        const fullName = document.getElementById('full_name').value;
+        const email = document.getElementById('email').value;
+        const password = document.getElementById('password').value;
+        
+        // Validate password length
+        if (password.length < 8) {
+            showAuthError('Password must be at least 8 characters long', authErrorContainer);
+            return;
+        }
+        
+        // Hide any previous error messages
+        errorDiv.style.display = 'none';
+        
+        try {
+            // Use our enhanced createUser function with proper error handling
+            const userCredential = await window.firebaseAuth.createUser(email, password, authErrorContainer);
+            
+            // Update profile with full name
+            await window.firebaseAuth.updateProfile(userCredential.user, {
+                displayName: fullName
+            }, authErrorContainer);
+            
+            // Handle the successful registration
+            handleSuccessfulRegistration(userCredential.user, fullName);
+        } catch (error) {
+            // Error is already displayed by the createUser function
+            console.error('Registration error:', error);
+            
+            // If this is an 'email already in use' error, show password reset option
+            if (error.code === 'auth/email-already-in-use') {
+                showPasswordResetOption(email, authErrorContainer);
+            }
+        }
+    });
+    
+    // Show password reset option
+    function showPasswordResetOption(email, container) {
+        const resetDiv = document.createElement('div');
+        resetDiv.className = 'password-reset-option';
+        resetDiv.innerHTML = `
+            <div class="alert alert-info">
+                <p>This email is already registered. Would you like to reset your password?</p>
+                <button id="reset-password-btn" class="btn btn-secondary btn-sm">Reset Password</button>
+                <button id="dismiss-reset-btn" class="btn btn-outline-secondary btn-sm">Dismiss</button>
+            </div>
+        `;
+        
+        // Remove any existing reset options
+        const existingResetOption = container.querySelector('.password-reset-option');
+        if (existingResetOption) {
+            existingResetOption.remove();
+        }
+        
+        // Add to container
+        const formElement = container.querySelector('form');
+        container.insertBefore(resetDiv, formElement);
+        
+        // Add event listener for reset button
+        document.getElementById('reset-password-btn').addEventListener('click', async () => {
+            try {
+                await window.firebaseAuth.sendPasswordResetEmail(email, container);
+                resetDiv.remove();
+            } catch (error) {
+                // Error is already displayed by the sendPasswordResetEmail function
+                console.error('Password reset error:', error);
+            }
+        });
+        
+        // Add event listener for dismiss button
+        document.getElementById('dismiss-reset-btn').addEventListener('click', () => {
+            resetDiv.remove();
+        });
+    }
+    
+    // Handle successful registration
+    async function handleSuccessfulRegistration(user, fullName) {
+        try {
+            // Get the Firebase ID token
+            const idToken = await user.getIdToken();
+            
+            // Show loading state
+            const submitButton = manualRegisterForm.querySelector('button[type="submit"]');
+            const originalText = submitButton.textContent;
+            submitButton.disabled = true;
+            submitButton.textContent = 'Registering...';
+            
+            // Send the token to the backend
+            const response = await fetch('{{ url_for("register") }}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ 
+                    idToken: idToken,
+                    full_name: fullName || user.displayName
+                }),
+            });
+            
+            // Restore button state
+            submitButton.disabled = false;
+            submitButton.textContent = originalText;
+            
+            const data = await response.json();
+            
+            if (data.success) {
+                showAuthSuccess('Registration successful! Redirecting...', authErrorContainer);
+                setTimeout(() => {
+                    window.location.href = data.redirect;
+                }, 1000);
+            } else {
+                showAuthError(data.error || 'An unknown error occurred', authErrorContainer);
+            }
+        } catch (error) {
+            console.error('Error sending registration to server:', error);
+            showAuthError('Registration partially complete but server error occurred. Please try logging in.', 
+                authErrorContainer);
+        }
+    }
+    
+    // Initialize Firebase UI Widget with better error handling
+    function initFirebaseUI() {
+        // Initialize the FirebaseUI Widget using Firebase
+        const ui = new firebaseui.auth.AuthUI(firebase.auth());
+        
+        // Configure Firebase UI
+        const uiConfig = {
+            callbacks: {
+                signInSuccessWithAuthResult: function(authResult) {
+                    // User successfully signed in or registered
+                    const user = authResult.user;
+                    const fullName = user.displayName || '';
+                    
+                    // Send to server to create or link account
+                    handleSuccessfulRegistration(user, fullName);
+                    return false; // Don't redirect automatically
+                },
+                signInFailure: function(error) {
+                    // Handle specific error cases
+                    console.error('Firebase UI error:', error);
+                    
+                    // Show the error in our custom error container
+                    const errorMessage = getFirebaseErrorMessage(error.code) || error.message;
+                    showAuthError(errorMessage, authErrorContainer);
+                    
+                    // If it's an email-already-in-use error, we can offer password reset
+                    if (error.code === 'auth/email-already-in-use' && error.email) {
+                        showPasswordResetOption(error.email, authErrorContainer);
+                    }
+                    
+                    return Promise.resolve();
+                },
+                uiShown: function() {
+                    // The widget is rendered, hide the loader
+                    document.getElementById('loader').style.display = 'none';
+                }
+            },
+            // Will use popup for IDP Providers sign-in flow
+            signInFlow: 'popup',
+            signInOptions: [
+                // Email/Password Provider
+                {
+                    provider: firebase.auth.EmailAuthProvider.PROVIDER_ID,
+                    requireDisplayName: true
+                },
+                // Google Sign-In enabled
+                firebase.auth.GoogleAuthProvider.PROVIDER_ID,
+            ],
+            // Terms of service URL
+            tosUrl: '#',
+            // Privacy policy URL
+            privacyPolicyUrl: '#'
+        };
+        
+        // The start method will wait until the DOM is loaded
+        ui.start('#firebaseui-auth-container', uiConfig);
+    }
+    
+    // Helper functions (these are also available in firebase-auth.js, but duplicated here for clarity)
+    function showAuthError(message, container = null) {
+        console.error('Auth error:', message);
+        
+        if (container) {
+            // Create error div with proper styling
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'alert alert-danger';
+            errorDiv.textContent = message;
+            
+            // Clear previous errors
+            const existingErrors = container.querySelectorAll('.alert-danger');
+            existingErrors.forEach(el => el.remove());
+            
+            // Add to container before the first element
+            container.insertBefore(errorDiv, container.firstChild);
+            
+            // Auto-dismiss after 10 seconds
+            setTimeout(() => {
+                if (errorDiv.parentNode) {
+                    errorDiv.classList.add('fade-out');
+                    setTimeout(() => errorDiv.remove(), 500);
+                }
+            }, 10000);
+        } else {
+            // Fallback
+            alert(message);
+        }
+    }
+    
+    function showAuthSuccess(message, container = null) {
+        console.log('Auth success:', message);
+        
+        if (container) {
+            const successDiv = document.createElement('div');
+            successDiv.className = 'alert alert-success';
+            successDiv.textContent = message;
+            
+            // Clear previous success messages
+            const existingSuccess = container.querySelectorAll('.alert-success');
+            existingSuccess.forEach(el => el.remove());
+            
+            // Add to container
+            container.insertBefore(successDiv, container.firstChild);
+            
+            // Auto-dismiss after 5 seconds
+            setTimeout(() => {
+                if (successDiv.parentNode) {
+                    successDiv.classList.add('fade-out');
+                    setTimeout(() => successDiv.remove(), 500);
+                }
+            }, 5000);
+        }
+    }
+    
+    function getFirebaseErrorMessage(errorCode) {
+        const errorMessages = {
+            'auth/email-already-in-use': 'This email is already registered. Please sign in instead or reset your password.',
+            'auth/invalid-email': 'The email address is not valid. Please check and try again.',
+            'auth/weak-password': 'Password is too weak. Please use a stronger password with at least 8 characters.',
+            'auth/operation-not-allowed': 'Email/password accounts are not enabled. Please contact support.',
+            'auth/account-exists-with-different-credential': 'An account already exists with the same email address but different sign-in credentials.',
+            'default': 'An authentication error occurred. Please try again.'
+        };
+        
+        return errorMessages[errorCode] || errorMessages['default'];
+    }
+    
+    // Listen for auth state changes
+    firebase.auth().onAuthStateChanged(function(user) {
+        if (user) {
+            // User is signed in, check if they just registered
+            // We'll handle this in the callbacks above
+        }
+    });
+});
+</script>
+{% endblock %}

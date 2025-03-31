@@ -187,7 +187,8 @@
         <div class="header-buttons">
             <a href="{{ url_for('register') }}" class="btn btn-primary">Sign Up</a>
             <a href="{{ url_for('student_login') }}" class="btn btn-primary">Student Login</a>
-            <a href="{{ url_for('login') }}" class="btn btn-secondary">Admin Login</a>
+            <a href="{{ url_for('admin_login') }}" class="btn btn-secondary">Admin Login</a>
+            <a href="{{ url_for('developer_login') }}" class="btn btn-secondary">Developer Login</a>
         </div>
     </header>
     
@@ -257,7 +258,13 @@
                     <div class="auth-card">
                         <h3>Administrator</h3>
                         <p>Access administrative controls to manage resources and monitor student progress.</p>
-                        <a href="{{ url_for('login') }}" class="btn btn-secondary">Admin Login</a>
+                        <a href="{{ url_for('admin_login') }}" class="btn btn-secondary">Admin Login</a>
+                    </div>
+                    
+                    <div class="auth-card">
+                        <h3>Developer</h3>
+                        <p>Access developer controls to upload resources and maintain the system.</p>
+                        <a href="{{ url_for('developer_login') }}" class="btn btn-secondary">Developer Login</a>
                     </div>
                 </div>
             </section>
