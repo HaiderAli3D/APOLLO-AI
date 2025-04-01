@@ -8,30 +8,21 @@ from flask import Flask, render_template, request, redirect, url_for, session, j
 import os
 import json
 import anthropic
+import sqlite3
 import hashlib
 import shutil
 import time
 import re
 import subprocess
 import glob
-# SQLite import removed as we're now using Firestore
 from pathlib import Path
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 import firebase_admin
-from firebase_admin import credentials, auth, firestore
+from firebase_admin import credentials, auth
 import pyrebase
-from google.cloud.firestore import SERVER_TIMESTAMP
-
-# Import Firestore database adapter
-from firestore_db_adapter import (
-    get_db, get_user_by_email, get_user_by_id, create_user, 
-    get_or_create_firebase_user, add_pdf_to_database, add_pdf_to_generated_pdfs,
-    track_activity, get_activity_data, calculate_user_streak,
-    get_pdfs_for_user, delete_pdf, verify_session_ownership
-)
 
 # Model Option:
 # Best model but expensive: "claude-3-7-sonnet-20250219"
@@ -105,8 +96,21 @@ def get_resource_manager():
         resource_manager = ResourceManager()
     return resource_manager
 
-# get_db function is imported from firestore_db_adapter.py
-# This provides a Firestore database connection instance
+# Create a function to get the database
+def get_db():
+    """Get a database instance for the current request."""
+    global db
+    if db is None:
+        db = OCRCSDatabase()
+        
+        # Add monkey patching for basic OCRCSDatabase class to support user verification
+        if not hasattr(db, 'verify_session_ownership'):
+            def verify_session_ownership(self, session_id, user_id):
+                """Check if a session belongs to a user - basic implementation always returns True."""
+                return True
+            db.verify_session_ownership = verify_session_ownership.__get__(db)
+    
+    return db
 
 # Register teardown function to close connections
 @app.teardown_appcontext
@@ -154,8 +158,87 @@ def verify_firebase_token(id_token):
         print(f"Token verification error: {e}")
         return False, None, None
 
-# Using the imported function from firestore_db_adapter.py
-# This function handles all the Firestore interactions
+def get_or_create_firebase_user(uid, email, full_name, role='student', profile_picture_url=None, decoded_token=None):
+    """Get existing user by Firebase UID or create a new one."""
+    conn = sqlite3.connect('user_database.db')
+    cursor = conn.cursor()
+    
+    # Get profile picture from token if not provided explicitly
+    if profile_picture_url is None and decoded_token:
+        # Check if token has picture URL (common with Google authentication)
+        profile_picture_url = decoded_token.get('picture', None)
+        
+        # Check Firebase provider
+        provider = decoded_token.get('firebase', {}).get('sign_in_provider', '')
+        if provider == 'google.com' and not profile_picture_url:
+            # Try alternative picture field that might be present in Google auth
+            profile_picture_url = decoded_token.get('photoURL', None)
+    
+    # Check if user exists by Firebase UID
+    cursor.execute("SELECT * FROM users WHERE firebase_uid = ?", (uid,))
+    user = cursor.fetchone()
+    
+    if user:
+        # User exists, update profile picture if provided
+        if profile_picture_url:
+            cursor.execute(
+                "UPDATE users SET profile_picture_url = ? WHERE id = ?",
+                (profile_picture_url, user[0])
+            )
+            conn.commit()
+            
+            # Refresh user data
+            cursor.execute("SELECT * FROM users WHERE id = ?", (user[0],))
+            user = cursor.fetchone()
+            
+        conn.close()
+        return user
+    
+    # Check if user exists by email (for migration)
+    cursor.execute("SELECT * FROM users WHERE email = ?", (email,))
+    user = cursor.fetchone()
+    
+    if user:
+        # Update existing user with Firebase UID and profile picture
+        update_query = "UPDATE users SET firebase_uid = ?, account_migrated = 1"
+        params = [uid, user[0]]
+        
+        if profile_picture_url:
+            update_query += ", profile_picture_url = ?"
+            params.insert(1, profile_picture_url)
+            
+        update_query += " WHERE id = ?"
+        
+        cursor.execute(update_query, params)
+        conn.commit()
+        
+        # Refresh user data
+        cursor.execute("SELECT * FROM users WHERE id = ?", (user[0],))
+        user = cursor.fetchone()
+        
+        conn.close()
+        return user
+    
+    # Create new user
+    insert_query = "INSERT INTO users (email, password_hash, full_name, role, firebase_uid, account_migrated"
+    values = [email, "firebase_auth", full_name, role, uid, 1]
+    
+    if profile_picture_url:
+        insert_query += ", profile_picture_url"
+        values.append(profile_picture_url)
+        
+    insert_query += ") VALUES (" + ", ".join(["?"] * len(values)) + ")"
+    
+    cursor.execute(insert_query, values)
+    conn.commit()
+    user_id = cursor.lastrowid
+    
+    # Get the created user
+    cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    user = cursor.fetchone()
+    conn.close()
+    
+    return user
 
 # Set up Anthropic API client
 def get_anthropic_client():
@@ -198,6 +281,41 @@ def generate_latex_document(title, content, author="APOLLO AI"):
     
     return latex_template
 
+def cleanup_old_pdfs(user_id):
+    """Remove old PDF files if a user has more than 10 saved."""
+    conn = sqlite3.connect('user_database.db')
+    cursor = conn.cursor()
+    
+    # Get all PDFs for the user, ordered by creation date (oldest first)
+    cursor.execute(
+        "SELECT id, filename FROM latex_pdfs WHERE user_id = ? ORDER BY created_at ASC", 
+        (user_id,)
+    )
+    pdfs = cursor.fetchall()
+    
+    # If there are more than 10 PDFs, delete the oldest ones
+    if len(pdfs) > 10:
+        to_delete = pdfs[:-10]  # Keep the 10 newest PDFs
+        
+        for pdf_id, filename in to_delete:
+            # Delete the file
+            filepath = os.path.join('temp_latex', filename)
+            pdf_filepath = filepath[:-4] + '.pdf'  # Replace .tex with .pdf
+            
+            try:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                if os.path.exists(pdf_filepath):
+                    os.remove(pdf_filepath)
+            except Exception as e:
+                print(f"Error deleting file {filename}: {e}")
+            
+            # Delete the database record
+            cursor.execute("DELETE FROM latex_pdfs WHERE id = ?", (pdf_id,))
+    
+    conn.commit()
+    conn.close()
+
 def cleanup_temp_latex_files():
     """
     Clean up orphaned temporary LaTeX files.
@@ -206,19 +324,137 @@ def cleanup_temp_latex_files():
     from latex_compiler import cleanup_temp_latex_files as cleanup_impl
     cleanup_impl()
 
-# Firestore DB initialization - collection structure is defined in firestore_db_adapter.py
-def init_user_db():
-    """Initialize Firestore collections if needed.
-    
-    In Firestore, collections and documents are created automatically when
-    data is first written, so we don't need to explicitly create them here.
-    This function is maintained for compatibility with the original code.
+def add_pdf_to_database(user_id, topic_code, topic_title, filename):
     """
-    # Get Firestore DB instance
-    db = get_db()
-    print("Firestore collections initialized")
+    DEPRECATED: Use the generated_pdfs table instead.
+    Legacy function for backward compatibility.
+    """
+    print("Warning: Using deprecated add_pdf_to_database function. Use generated_pdfs table instead.")
+    conn = sqlite3.connect('user_database.db')
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute(
+            "INSERT INTO latex_pdfs (user_id, topic_code, topic_title, filename) VALUES (?, ?, ?, ?)",
+            (user_id, topic_code, topic_title, filename)
+        )
+        conn.commit()
+        pdf_id = cursor.lastrowid
+    except Exception as e:
+        conn.rollback()
+        pdf_id = None
+        print(f"Error adding PDF to database: {e}")
+    finally:
+        conn.close()
+    
+    return pdf_id
 
-# User functions are now imported from firestore_db_adapter.py
+# Database functions for user management
+def init_user_db():
+    """Initialize the user database tables if they don't exist."""
+    conn = sqlite3.connect('user_database.db')
+    cursor = conn.cursor()
+    
+    # Create users table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        full_name TEXT NOT NULL,
+        role TEXT CHECK(role IN ('student', 'admin', 'developer')) DEFAULT 'student',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        firebase_uid TEXT,
+        account_migrated BOOLEAN DEFAULT 0
+    )
+    ''')
+    
+    # Create generated_pdfs table for storing LaTeX PDFs
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS generated_pdfs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        topic_code TEXT NOT NULL,
+        title TEXT NOT NULL,
+        latex_content TEXT NOT NULL,
+        pdf_path TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+    ''')
+    
+    # Modify sessions table to include user_id if it exists
+    cursor.execute("PRAGMA table_info(sessions)")
+    columns = cursor.fetchall()
+    column_names = [col[1] for col in columns]
+    
+    if 'user_id' not in column_names and columns:
+        try:
+            cursor.execute("ALTER TABLE sessions ADD COLUMN user_id INTEGER REFERENCES users(id)")
+        except sqlite3.Error as e:
+            print(f"Error modifying sessions table: {e}")
+            
+    # Create latex_pdfs table for storing generated PDFs
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS latex_pdfs (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        topic_code TEXT NOT NULL,
+        topic_title TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+    ''')
+    
+    conn.commit()
+    conn.close()
+
+def get_user_by_email(email):
+    """Get a user from the database by email."""
+    conn = sqlite3.connect('user_database.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE email = ?", (email,))
+    user = cursor.fetchone()
+    conn.close()
+    return user
+
+def get_user_by_id(user_id):
+    """Get a user from the database by ID."""
+    conn = sqlite3.connect('user_database.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    user = cursor.fetchone()
+    conn.close()
+    return user
+
+def create_user(email, password, full_name, role='student'):
+    """Create a new user in the database."""
+    conn = sqlite3.connect('user_database.db')
+    cursor = conn.cursor()
+    
+    # Check if user already exists
+    cursor.execute("SELECT id FROM users WHERE email = ?", (email,))
+    if cursor.fetchone():
+        conn.close()
+        return False, "Email already registered"
+    
+    # Hash the password before storing
+    password_hash = generate_password_hash(password)
+    
+    try:
+        cursor.execute(
+            "INSERT INTO users (email, password_hash, full_name, role) VALUES (?, ?, ?, ?)",
+            (email, password_hash, full_name, role)
+        )
+        conn.commit()
+        user_id = cursor.lastrowid
+        conn.close()
+        return True, user_id
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        return False, str(e)
 
 # Import Firebase Authentication Middleware
 from firebase_auth_middleware import firebase_auth_required, admin_auth_required, developer_auth_required, validate_firebase_token, refresh_firebase_token
@@ -521,33 +757,50 @@ Aim for brief, focused responses suitable for last-minute revision. Ensure the s
 
     elif mode == "test":
         return f"""
-You are now assisting the student in **TEST mode** for **{detailed_topic}**, part of the **OCR A-Level Computer Science** curriculum (**{component_title}**).
+You are an AI tutor preparing a practice exam in LaTeX. You MUST follow these rules when generating the exam:
+1. You will only output LaTeX code—no other text, no explanations, no disclaimers.
+2. The code must be syntactically valid, starting on the very first line with LaTeX commands (e.g., \documentclass{...}).
+3. You must not include images or external resources in the LaTeX code.
+4. The exam must replicate an OCR-style front page, with fields for name, candidate number, center number, date, etc., and must not contain any questions on the front page.
+5. The exam must have 4–6 questions covering {topic_info} from the OCR A-Level Computer Science curriculum ({component_title}), with a total of 30–45 marks. The exam questions should be styled, numbered, and formatted like an OCR A-Level paper. Mix short-answer and extended-response questions.
+6. Clearly state grade boundaries (A*, A, B, C, D) on the exam and give a time limit.
+7. Provide lines/spaces for students to write their answers under each question.
+8. Do not provide any additional commentary in the output—ONLY the LaTeX code for the exam. No further text, titles, or explanation before or after the code.
+9. **Your total LaTeX code output must be fewer than 5000 characters (including whitespace).** If necessary, shorten or simplify the exam content to stay under this limit.
 
-Your role is to:
+USER PROMPT (or "User" message to the AI):
+You are now testing the user’s knowledge of {topic_info} from the OCR A-Level Computer Science curriculum ({component_title}).
 
-1. **Welcome the student** to TEST mode and clearly state the focus: `{detailed_topic}`.
-2. **Explain the purpose of this mode**: to simulate realistic exam conditions using structured, exam-style practice questions.
-3. **Guide the student to begin** by clicking the **"Generate Exam PDF"** button at the top of the screen.
-4. **Inform them what the system will generate**:
-   - A full-length OCR-style exam paper focused on `{detailed_topic}`
-   - 4–6 realistic exam questions across various subtopics
-   - A total mark range of 30–45
-   - A mix of short-answer and extended-response questions
-   - Clearly structured grade boundaries
-   - An OCR-style front page with candidate details and exam instructions
-   - Space to write answers directly on the PDF
-5. **Offer your support** throughout their preparation by:
-   - Explaining key concepts
-   - Clarifying definitions or technical topics
-   - Helping break down common question styles
-   - Answering any specific questions about `{detailed_topic}`
-6. **Encourage them to return** after attempting the exam to:
-   - Review their answers with you
-   - Receive guidance or worked solutions
-   - Get detailed feedback on any challenging questions
+Please create a practice assessment as a PDF using LaTeX that follows these rules:
+- 4–6 exam-style questions (short-answer and extended-response) covering various aspects of {topic_info}.
+- Clearly states grade boundaries (A*/A/B/C/D).
+- 30–45 total marks, with a reasonable time limit.
+- The first page must replicate a real OCR exam front page (no questions, just fields for name/candidate/center/date, paper title, total marks, general guidance, and time limit).
+- Output only valid LaTeX code, starting on the very first line. Include no text outside the LaTeX code.
+- Do not use any images or external resources.
+- **All LaTeX code must be under 5000 characters, including whitespace.**
 
-Maintain a **friendly, professional, and encouraging tone**.  
-Your goal is to **build confidence** while helping the student **prepare effectively and independently** for their OCR A-Level exam.
+**Assessment Process**:
+1. Present all questions at once (i.e., the entire exam in LaTeX).
+2. Wait for the user’s answers before providing any marking or feedback.
+3. After the user submits answers, mark them like an OCR examiner, provide a mark scheme, and assign an overall grade.
+4. Offer feedback according to Pólya’s four-step problem-solving approach:
+   - Understanding the Problem
+   - Devising a Plan
+   - Carrying Out the Plan
+   - Looking Back
+
+IMPORTANT NOTES:
+- The first line of your response must be a LaTeX command (e.g., \documentclass{...}).
+- Do not output anything else other than the LaTeX code. 
+- The LaTeX code must be complete and compile without further editing.
+- **Keep your LaTeX code under 5000 characters, including whitespace.**
+- When I request the exam, respond ONLY with LaTeX code as per the instructions above. 
+- If I ask for marking or clarification after submitting my answers, you may then respond in normal English.
+
+ONLY RESPOND WITH LATEX CODE NOTHING ELSE
+YOUR FIRST LINE SHOULD BE \documentclass
+ONLY RESPOND WITH LATEX
 
 """
 
@@ -562,14 +815,44 @@ def initialize_db():
 
 # Function to migrate database schema
 def migrate_database():
-    """
-    No structural migrations needed for Firestore as it's a schemaless database.
-    
-    This function is maintained for compatibility with the original code.
-    In Firestore, we don't need to add columns to existing tables as documents
-    can have different fields without predefined schema.
-    """
-    print("Firestore migration: No schema migrations needed")
+    """Apply database migrations to add new columns to existing tables"""
+    print("Running database migrations...")
+    try:
+        conn = sqlite3.connect('ocr_cs_tutor.db')
+        cursor = conn.cursor()
+        
+        # Check if user_id column exists in topic_progress table
+        cursor.execute("PRAGMA table_info(topic_progress)")
+        columns = cursor.fetchall()
+        column_names = [col[1] for col in columns]
+        
+        if 'user_id' not in column_names and columns:
+            print("Adding user_id column to topic_progress table")
+            cursor.execute("ALTER TABLE topic_progress ADD COLUMN user_id INTEGER")
+        
+        # Check if user_id column exists in sessions table
+        cursor.execute("PRAGMA table_info(sessions)")
+        columns = cursor.fetchall()
+        column_names = [col[1] for col in columns]
+        
+        if 'user_id' not in column_names and columns:
+            print("Adding user_id column to sessions table")
+            cursor.execute("ALTER TABLE sessions ADD COLUMN user_id INTEGER")
+        
+        # Check if user_id column exists in exam_practice table
+        cursor.execute("PRAGMA table_info(exam_practice)")
+        columns = cursor.fetchall()
+        column_names = [col[1] for col in columns]
+        
+        if 'user_id' not in column_names and columns:
+            print("Adding user_id column to exam_practice table")
+            cursor.execute("ALTER TABLE exam_practice ADD COLUMN user_id INTEGER")
+        
+        conn.commit()
+        conn.close()
+        print("Database migrations completed successfully")
+    except sqlite3.Error as e:
+        print(f"Database migration error: {e}")
 
 # Create initialization function for database
 with app.app_context():
@@ -761,9 +1044,12 @@ def admin_login():
                         session['user_name'] = user[3]
                         session['is_admin'] = True
                         
-                        # Role updates are now handled by Firestore adapter
-                        database = get_db()
-                        database.update_user_role(user[0], 'admin')
+                        # Update role to admin if not already
+                        conn = sqlite3.connect('user_database.db')
+                        cursor = conn.cursor()
+                        cursor.execute("UPDATE users SET role = 'admin' WHERE id = ?", (user[0],))
+                        conn.commit()
+                        conn.close()
                         
                         return redirect(url_for('admin_dashboard'))
                     else:
@@ -875,12 +1161,20 @@ def developer_login():
                         # If using default password, make sure hash is updated
                         if password == 'password' and not check_password_hash(user[2], password):
                             # Update password hash and role
-                            database = get_db()
-                            database.update_user_password_and_role(user[0], generate_password_hash(password), 'developer')
+                            conn = sqlite3.connect('user_database.db')
+                            cursor = conn.cursor()
+                            password_hash = generate_password_hash(password)
+                            cursor.execute("UPDATE users SET password_hash = ?, role = 'developer' WHERE id = ?", 
+                                          (password_hash, user[0]))
+                            conn.commit()
+                            conn.close()
                         else:
                             # Just update role to developer
-                            database = get_db()
-                            database.update_user_role(user[0], 'developer')
+                            conn = sqlite3.connect('user_database.db')
+                            cursor = conn.cursor()
+                            cursor.execute("UPDATE users SET role = 'developer' WHERE id = ?", (user[0],))
+                            conn.commit()
+                            conn.close()
                         
                         flash('Developer login successful', 'success')
                         return redirect(url_for('developer_dashboard'))
@@ -933,16 +1227,19 @@ def refresh_token():
         if session.get('user_id'):
             user_id = session.get('user_id')
             
-            # Get user data using Firestore adapter
-            database = get_db()
-            user = database.get_user_by_id(user_id)
+            # Get user data
+            conn = sqlite3.connect('user_database.db')
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM users WHERE id = ? AND firebase_uid = ?", (user_id, uid))
+            user = cursor.fetchone()
+            conn.close()
             
-            if not user or user[6] != uid:  # Index 6 is firebase_uid
+            if not user:
                 # User no longer exists or firebase_uid mismatch
                 return jsonify({'error': 'User validation failed'}), 401
                 
             # Update user role flags
-            if user[4] == 'admin':  # Index 4 is role
+            if user[4] == 'admin':
                 session['is_admin'] = True
             else:
                 session['is_admin'] = False
@@ -1501,9 +1798,12 @@ def student_progress():
         # Try to filter by user_id
         topic_progress = database.get_topic_progress(user_id=user_id)
         exam_progress = database.get_exam_progress(user_id=user_id)
-    except TypeError as e:
-        # Fallback if we get TypeError (when function doesn't accept user_id parameter)
-        print(f"Warning: Database function doesn't accept user_id parameter: {e}")
+    except (sqlite3.OperationalError, TypeError) as e:
+        # Fallback if we get "no such column" error or TypeError (when function doesn't accept user_id parameter)
+        if isinstance(e, sqlite3.OperationalError) and "no such column: user_id" in str(e):
+            print(f"Warning: User ID column missing - using unfiltered data: {e}")
+        elif isinstance(e, TypeError):
+            print(f"Warning: Database function doesn't accept user_id parameter: {e}")
         # Fallback to unfiltered data
         topic_progress = database.get_topic_progress()
         exam_progress = database.get_exam_progress()
@@ -1535,8 +1835,8 @@ def student_rate_topic():
     try:
         # Try to update with user_id
         database.update_topic_progress(topic_code, topic_title, rating, notes, user_id=user_id)
-    except Exception as e:
-        # Check if it's a database-related error
+    except sqlite3.OperationalError as e:
+        # Fallback if we get "no such column" error
         if "no such column: user_id" in str(e):
             print(f"Warning: User ID column missing in topic_progress: {e}")
             # Fallback to non-user-specific update
@@ -1573,7 +1873,7 @@ def student_record_exam():
         if isinstance(e, TypeError) and "got an unexpected keyword argument 'user_id'" in str(e):
             # Fallback to non-user-specific record
             database.record_exam_practice(topic_code, question_type, difficulty, score, max_score)
-        elif "no such column: user_id" in str(e):
+        elif isinstance(e, sqlite3.OperationalError) and "no such column: user_id" in str(e):
             # Fallback if we get "no such column" error
             database.record_exam_practice(topic_code, question_type, difficulty, score, max_score)
         else:
@@ -1616,39 +1916,32 @@ def get_recent_messages():
     if not session_id:
         return jsonify({'error': 'Missing session_id parameter'}), 400
     
-    try:
-        # Get database
-        database = get_db()
+    # Get database
+    database = get_db()
+    
+    # Verify this session belongs to the current user
+    if database.verify_session_ownership(session_id, user_id):
+        # Get recent messages (limited to last 10)
+        messages = database.get_session_messages(session_id)
         
-        # Import and use verify_session_ownership function directly
-        from firestore_db_adapter import verify_session_ownership
+        # If there are more than 10 messages, get only the last 10
+        if len(messages) > 10:
+            messages = messages[-10:]
         
-        # Verify this session belongs to the current user
-        if verify_session_ownership(session_id, user_id):
-            # Get recent messages (limited to last 10)
-            messages = database.get_session_messages(session_id)
-            
-            # If there are more than 10 messages, get only the last 10
-            if len(messages) > 10:
-                messages = messages[-10:]
-            
-            # Format messages for frontend
-            formatted_messages = []
-            for _, role, content in messages:
-                formatted_messages.append({
-                    "role": role,
-                    "content": content
-                })
-            
-            return jsonify({
-                'success': True,
-                'messages': formatted_messages
+        # Format messages for frontend
+        formatted_messages = []
+        for _, role, content in messages:
+            formatted_messages.append({
+                "role": role,
+                "content": content
             })
-        else:
-            return jsonify({'error': 'Session not found or unauthorized'}), 403
-    except Exception as e:
-        print(f"Error getting recent messages: {str(e)}")
-        return jsonify({'error': f'Error retrieving messages: {str(e)}'}), 500
+        
+        return jsonify({
+            'success': True,
+            'messages': formatted_messages
+        })
+    else:
+        return jsonify({'error': 'Session not found or unauthorized'}), 403
 
 @app.route('/student/clear-chat-history', methods=['POST'])
 @login_required
@@ -1661,47 +1954,27 @@ def clear_chat_history():
     if not session_id:
         return jsonify({'error': 'Missing session_id parameter'}), 400
     
-    try:
-        # Get database
-        database = get_db()
-        
-        # Import and use verify_session_ownership function directly
-        from firestore_db_adapter import verify_session_ownership
-        
-        # Verify this session belongs to the current user
-        if verify_session_ownership(session_id, user_id):
-            try:
-                # Use the database wrapper method to delete messages
-                success = database.delete_session_messages(session_id)
-                
-                if success:
-                    return jsonify({
-                        'success': True,
-                        'message': 'Chat history cleared successfully'
-                    })
-                else:
-                    return jsonify({'error': 'Failed to clear chat history'}), 500
-            except Exception as e:
-                print(f"Error clearing chat history: {str(e)}")
-                return jsonify({'error': f'Database error: {str(e)}'}), 500
-        else:
-            # For backward compatibility, assume it's allowed if we can't verify
-            try:
-                success = database.delete_session_messages(session_id)
-                
-                if success:
-                    return jsonify({
-                        'success': True,
-                        'message': 'Chat history cleared successfully'
-                    })
-                else:
-                    return jsonify({'error': 'Failed to clear chat history'}), 500
-            except Exception as e:
-                print(f"Error clearing chat history (compatibility mode): {str(e)}")
-                return jsonify({'error': f'Database error: {str(e)}'}), 500
-    except Exception as e:
-        print(f"Error in clear_chat_history: {str(e)}")
-        return jsonify({'error': f'Error clearing chat history: {str(e)}'}), 500
+    # Get database
+    database = get_db()
+    
+    # Verify this session belongs to the current user
+    if database.verify_session_ownership(session_id, user_id):
+        try:
+            # Delete all messages for this session
+            conn = sqlite3.connect('ocr_cs_tutor.db')
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM conversation_history WHERE session_id = ?", (session_id,))
+            conn.commit()
+            conn.close()
+            
+            return jsonify({
+                'success': True,
+                'message': 'Chat history cleared successfully'
+            })
+        except Exception as e:
+            return jsonify({'error': f'Database error: {str(e)}'}), 500
+    else:
+        return jsonify({'error': 'Session not found or unauthorized'}), 403
 
 @app.route('/resources/<path:filename>')
 def serve_resource(filename):
@@ -1711,7 +1984,7 @@ def serve_resource(filename):
 @app.route('/generate-exam-pdf', methods=['POST'])
 @login_required
 def generate_exam_pdf():
-    """Generate a PDF from LaTeX content and store it both locally and in Firebase Storage."""
+    """Generate a PDF from LaTeX content."""
     data = request.json
     topic_title = data.get('topic_title', 'OCR Computer Science Practice Paper')
     content = data.get('content', '')
@@ -1731,66 +2004,35 @@ def generate_exam_pdf():
     # Import the LaTeX compiler
     from latex_compiler import compile_latex_to_pdf
     
+    # Compile LaTeX to PDF
+    pdf_path = compile_latex_to_pdf(content, user_id, topic_code, topic_title)
+    
+    if not pdf_path:
+        return jsonify({
+            'error': 'PDF compilation failed', 
+            'details': 'Check server logs for details'
+        }), 500
+    
     try:
-        # Compile LaTeX to PDF
-        local_pdf_path = compile_latex_to_pdf(content, user_id, topic_code, topic_title)
+        # Connect to database
+        conn = sqlite3.connect('user_database.db')
+        cursor = conn.cursor()
         
-        if not local_pdf_path:
-            return jsonify({
-                'error': 'PDF compilation failed', 
-                'details': 'Check server logs for details'
-            }), 500
-        
-        # Get full local path
-        full_local_path = os.path.join('static', local_pdf_path)
-        
-        # Initialize variables for Firebase Storage
-        storage_url = None
-        storage_path = None
-        
-        # Try to upload to Firebase Storage
-        try:
-            # Import the Firebase Storage adapter
-            from firebase_storage_adapter import upload_pdf
-            
-            # Upload the PDF to Firebase Storage
-            storage_success, storage_result = upload_pdf(full_local_path, user_id, os.path.basename(local_pdf_path))
-            
-            if storage_success:
-                storage_url = storage_result  # The result is the public URL
-                # Extract storage path from URL (for future reference)
-                from firebase_storage_adapter import url_to_storage_path
-                storage_path = url_to_storage_path(storage_url)
-                print(f"PDF uploaded to Firebase Storage: {storage_url}")
-            else:
-                print(f"Warning: Failed to upload PDF to Firebase Storage: {storage_result}")
-                print("Continuing with local storage only")
-        except Exception as storage_error:
-            # Log error but continue with local storage only
-            print(f"Error uploading to Firebase Storage: {str(storage_error)}")
-        
-        # Get Firestore database
-        database = get_db()
-        
-        # Store PDF metadata and Storage URL in Firestore
-        pdf_id = database.add_pdf_to_generated_pdfs(
-            user_id, 
-            topic_code, 
-            topic_title, 
-            content, 
-            local_pdf_path,
-            storage_url,
-            storage_path
+        # Store in database
+        cursor.execute(
+            "INSERT INTO generated_pdfs (user_id, topic_code, title, latex_content, pdf_path) VALUES (?, ?, ?, ?, ?)",
+            (user_id, topic_code, topic_title, content, pdf_path)
         )
         
-        # Clean up old PDFs (using the Firestore adapter)
-        database.cleanup_old_pdfs(user_id)
+        pdf_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
         
-        # If we have a Storage URL, return that; otherwise, return local URL
-        if storage_url:
-            pdf_url = storage_url
-        else:
-            pdf_url = url_for('static', filename=local_pdf_path, _external=True)
+        # Legacy cleanup for backward compatibility
+        cleanup_old_pdfs(user_id)
+        
+        # Return URL to the generated PDF
+        pdf_url = url_for('static', filename=pdf_path, _external=True)
         
         return jsonify({
             'success': True,
@@ -1798,9 +2040,8 @@ def generate_exam_pdf():
             'pdf_id': pdf_id
         })
     except Exception as e:
-        print(f"Error in generate_exam_pdf: {str(e)}")
         return jsonify({
-            'error': 'Error generating or storing PDF', 
+            'error': 'Error storing PDF information', 
             'details': str(e)
         }), 500
 
@@ -1810,84 +2051,44 @@ def serve_pdf(filename):
     """Serve PDF files."""
     return send_from_directory('temp_latex', filename, mimetype='application/pdf')
 
-# Helper function for getting current user ID
-def get_current_user_id():
-    """Get the current user's ID from the session."""
-    return session.get('user_id')
-
 @app.route('/student/pdf-library')
 @login_required
 def pdf_library():
-    """Show all PDFs created by the user using Firestore."""
-    try:
-        # Get current user
-        user_id = get_current_user_id()
-        
-        # Get PDFs from Firestore
-        pdfs = get_db().get_pdfs_for_user(user_id)
-        
-        return render_template('student/pdf_library.html', pdfs=pdfs)
-    except Exception as e:
-        # Log error
-        app.logger.error(f"Error retrieving PDFs: {str(e)}")
-        # Return error message to template
-        error_message = f"Error retrieving PDFs: {str(e)}"
-        return render_template('student/pdf_library.html', pdfs=[], error=error_message)
-
-@app.route('/student/delete-pdf', methods=['POST'])
-@login_required
-def delete_pdf():
-    """Delete a PDF created by the user, handling both local files and Firebase Storage."""
-    data = request.json
-    pdf_id = data.get('pdf_id')
+    """Show all PDFs created by the user."""
     user_id = session.get('user_id')
     
-    if not pdf_id:
-        return jsonify({'error': 'Missing PDF ID'}), 400
+    conn = sqlite3.connect('user_database.db')
+    cursor = conn.cursor()
     
-    try:
-        # Get database
-        database = get_db()
-        
-        # Get the PDF from Firestore first to check Storage URL
-        pdf_data = database.get_pdf_by_id(pdf_id, user_id)
-        
-        if not pdf_data:
-            return jsonify({'error': 'PDF not found or unauthorized'}), 404
-            
-        # Check if this PDF has a Storage URL
-        storage_url = pdf_data.get('storage_url')
-        
-        if storage_url:
-            # Import Storage adapter
-            from firebase_storage_adapter import delete_pdf as delete_storage_pdf
-            
-            # Delete from Storage
-            storage_delete_success = delete_storage_pdf(storage_url, user_id)
-            if not storage_delete_success:
-                # Log the error but continue to delete from Firestore
-                print(f"Warning: Failed to delete PDF from Storage: {storage_url}")
-        
-        # Also delete the local file if it exists
-        pdf_path = pdf_data.get('pdf_path')
-        if pdf_path:
-            full_path = os.path.join('static', pdf_path)
-            if os.path.exists(full_path):
-                try:
-                    os.remove(full_path)
-                except Exception as e:
-                    print(f"Warning: Failed to delete local PDF file: {e}")
-        
-        # Delete from Firestore
-        success = database.delete_pdf(user_id, pdf_id)
-        
-        if success:
-            return jsonify({'success': True})
-        else:
-            return jsonify({'error': 'Failed to delete PDF record from database'}), 500
-    except Exception as e:
-        print(f"Error deleting PDF: {str(e)}")
-        return jsonify({'error': f'Error deleting PDF: {str(e)}'}), 500
+    # Get PDFs from generated_pdfs table (new system)
+    cursor.execute(
+        "SELECT id, topic_code, title, created_at, pdf_path FROM generated_pdfs WHERE user_id = ? ORDER BY created_at DESC",
+        (user_id,)
+    )
+    
+    pdfs = cursor.fetchall()
+    
+    # Get PDFs from latex_pdfs table (old system) for backward compatibility
+    cursor.execute(
+        "SELECT id, topic_code, topic_title, created_at, filename FROM latex_pdfs WHERE user_id = ? ORDER BY created_at DESC",
+        (user_id,)
+    )
+    
+    legacy_pdfs = cursor.fetchall()
+    
+    # Convert legacy PDFs to the same format as new PDFs
+    for i, (pdf_id, topic_code, title, created_at, filename) in enumerate(legacy_pdfs):
+        # Replace filename path with URL path format
+        legacy_pdfs[i] = (pdf_id, topic_code, title, created_at, f"temp_latex/{filename.replace('.tex', '.pdf')}")
+    
+    # Combine both PDF lists
+    all_pdfs = pdfs + legacy_pdfs
+    
+    conn.close()
+    
+    return render_template('student/pdf_library.html', 
+                          pdfs=all_pdfs,
+                          user_name=session.get('user_name'))
 
 # Progress Tracking Widget Routes
 
@@ -1904,14 +2105,40 @@ def track_activity():
         return jsonify({'error': 'User not authenticated'}), 401
     
     try:
-        # Get Firestore DB instance
-        database = get_db()
+        # Get current date in YYYY-MM-DD format
+        today = datetime.now().strftime('%Y-%m-%d')
         
-        # Track activity using Firestore adapter
-        database.track_activity(user_id, activity_type, session_duration)
+        # Connect to database
+        conn = sqlite3.connect('user_database.db')
+        cursor = conn.cursor()
+        
+        # Check if user already has activity for today
+        cursor.execute(
+            "SELECT id FROM user_activity WHERE user_id = ? AND activity_date = ?",
+            (user_id, today)
+        )
+        
+        existing_activity = cursor.fetchone()
+        
+        if existing_activity:
+            # Update existing activity record
+            cursor.execute(
+                "UPDATE user_activity SET session_duration = session_duration + ? WHERE user_id = ? AND activity_date = ?",
+                (session_duration, user_id, today)
+            )
+        else:
+            # Create new activity record
+            cursor.execute(
+                "INSERT INTO user_activity (user_id, activity_date, activity_type, session_duration) VALUES (?, ?, ?, ?)",
+                (user_id, today, activity_type, session_duration)
+            )
+        
+        conn.commit()
         
         # Calculate current streak
-        streak_data = database.calculate_user_streak(user_id)
+        streak_data = calculate_user_streak(user_id)
+        
+        conn.close()
         
         return jsonify({
             'success': True,
@@ -1932,8 +2159,8 @@ def get_activity_data():
         return jsonify({'error': 'User not authenticated'}), 401
     
     try:
-        # Get Firestore database instance
-        database = get_db()
+        conn = sqlite3.connect('user_database.db')
+        cursor = conn.cursor()
         
         # Calculate first day of the month and last day of the month
         today = datetime.now()
@@ -1948,16 +2175,27 @@ def get_activity_data():
             end_date = datetime(year, month + 1, 1) - timedelta(days=1)
         end_date = end_date.strftime('%Y-%m-%d')
         
-        # Get activity data from Firestore
-        activities = database.get_activity_data(user_id, start_date, end_date)
+        # Get activity data for the specified month
+        cursor.execute(
+            """
+            SELECT activity_date, activity_type, session_duration 
+            FROM user_activity 
+            WHERE user_id = ? AND activity_date BETWEEN ? AND ?
+            ORDER BY activity_date
+            """,
+            (user_id, start_date, end_date)
+        )
+        
+        activities = cursor.fetchall()
         
         # Calculate streak
-        streak_data = database.calculate_user_streak(user_id)
+        streak_data = calculate_user_streak(user_id)
         
         # Format activity data for the calendar
         activity_data = []
         for date, activity_type, duration in activities:
             # Determine activity level (1-4) based on duration or other metrics
+            # This is a simple example - you may want to use more sophisticated logic
             level = 1  # Default level
             if duration > 3600:  # More than 1 hour
                 level = 4
@@ -1971,6 +2209,8 @@ def get_activity_data():
                 'type': activity_type,
                 'level': level
             })
+        
+        conn.close()
         
         return jsonify({
             'activityData': activity_data,
@@ -1998,9 +2238,8 @@ def get_topic_progress_data():
         try:
             # Try to get user-specific progress data
             progress_data = database.get_topic_progress(user_id=user_id)
-        except Exception as e:
+        except (sqlite3.OperationalError, TypeError) as e:
             # Fallback to unfiltered data if filtering by user_id fails
-            print(f"Warning: Error getting user-specific progress data: {e}")
             progress_data = database.get_topic_progress()
         
         # Format topic progress data for the frontend
@@ -2038,7 +2277,7 @@ def mark_topic_reviewed():
         try:
             # Try with user_id
             progress_data = database.get_topic_progress(user_id=user_id)
-        except TypeError:
+        except (sqlite3.OperationalError, TypeError):
             # Fallback
             progress_data = database.get_topic_progress()
         
@@ -2060,8 +2299,46 @@ def mark_topic_reviewed():
         # Update the topic progress with today's date
         today = datetime.now().strftime('%Y-%m-%d')
         
-        # Try to update with user_id
+        # Get a direct database connection to verify the update
+        conn = sqlite3.connect('ocr_cs_tutor.db')
+        cursor = conn.cursor()
+        
+        # First check if there's a user_id column in the topic_progress table
+        cursor.execute("PRAGMA table_info(topic_progress)")
+        columns = [col[1] for col in cursor.fetchall()]
+        has_user_id = 'user_id' in columns
+        
+        # Update directly with SQL to ensure it works
+        if has_user_id:
+            # If we have a user_id column, use it
+            cursor.execute(
+                """
+                UPDATE topic_progress 
+                SET last_studied = ? 
+                WHERE topic_code = ? AND user_id = ?
+                """, 
+                (today, topic_code, user_id)
+            )
+        else:
+            # Fallback to update without user_id
+            cursor.execute(
+                """
+                UPDATE topic_progress 
+                SET last_studied = ? 
+                WHERE topic_code = ?
+                """, 
+                (today, topic_code)
+            )
+        
+        rows_updated = cursor.rowcount
+        conn.commit()
+        conn.close()
+        
+        print(f"Updated topic {topic_code} for user {user_id}, rows affected: {rows_updated}")
+        
+        # Also try the ORM update as a backup
         try:
+            # Try to update with user_id
             database.update_topic_progress(
                 topic_data['topic_code'],
                 topic_data['topic_title'],
@@ -2070,7 +2347,7 @@ def mark_topic_reviewed():
                 user_id=user_id,
                 last_studied=today
             )
-        except TypeError as e:
+        except (sqlite3.OperationalError, TypeError) as e:
             # Fallback if user_id parameter fails
             if "user_id" in str(e):
                 database.update_topic_progress(
@@ -2081,18 +2358,130 @@ def mark_topic_reviewed():
                     last_studied=today
                 )
             else:
-                # Re-raise if it's another type of error
-                raise
-                
-        # Also record this as an activity for streak tracking - using Firestore adapter
-        database.track_activity(user_id, "topic_review", 600)  # 10 minutes by default
+                # Log but don't re-raise since we already tried direct SQL update
+                print(f"ORM update failed but SQL update may have succeeded: {e}")
+        
+        # Also record this as an activity for streak tracking
+        conn = sqlite3.connect('user_database.db')
+        cursor = conn.cursor()
+        
+        # Check if user already has activity for today
+        cursor.execute(
+            "SELECT id FROM user_activity WHERE user_id = ? AND activity_date = ?",
+            (user_id, today)
+        )
+        
+        existing_activity = cursor.fetchone()
+        
+        if existing_activity:
+            # Update existing activity record
+            cursor.execute(
+                "UPDATE user_activity SET session_duration = session_duration + 600 WHERE user_id = ? AND activity_date = ?",
+                (user_id, today)
+            )
+        else:
+            # Create new activity record
+            cursor.execute(
+                "INSERT INTO user_activity (user_id, activity_date, activity_type, session_duration) VALUES (?, ?, ?, ?)",
+                (user_id, today, "topic_review", 600)  # 10 minutes by default
+            )
+        
+        conn.commit()
+        conn.close()
         
         return jsonify({'success': True})
     except Exception as e:
         print(f"Error marking topic as reviewed: {str(e)}")
         return jsonify({'error': f'Error marking topic as reviewed: {str(e)}'}), 500
 
-# calculate_user_streak is now imported from firestore_db_adapter.py
+# Helper function for streak calculation
+def calculate_user_streak(user_id):
+    """Calculate a user's current streak and whether it's at risk."""
+    conn = sqlite3.connect('user_database.db')
+    cursor = conn.cursor()
+    
+    # Get today's date and yesterday's date
+    today = datetime.now().date()
+    yesterday = today - timedelta(days=1)
+    two_days_ago = today - timedelta(days=2)
+    
+    # Format dates as strings
+    today_str = today.strftime('%Y-%m-%d')
+    yesterday_str = yesterday.strftime('%Y-%m-%d')
+    two_days_ago_str = two_days_ago.strftime('%Y-%m-%d')
+    
+    # Check if user has activity for today
+    cursor.execute(
+        "SELECT 1 FROM user_activity WHERE user_id = ? AND activity_date = ?",
+        (user_id, today_str)
+    )
+    has_activity_today = cursor.fetchone() is not None
+    
+    # Check if user has activity for yesterday
+    cursor.execute(
+        "SELECT 1 FROM user_activity WHERE user_id = ? AND activity_date = ?",
+        (user_id, yesterday_str)
+    )
+    has_activity_yesterday = cursor.fetchone() is not None
+    
+    # Check if user has activity for two days ago
+    cursor.execute(
+        "SELECT 1 FROM user_activity WHERE user_id = ? AND activity_date = ?",
+        (user_id, two_days_ago_str)
+    )
+    has_activity_two_days_ago = cursor.fetchone() is not None
+    
+    # Get all activity dates for this user in descending order
+    cursor.execute(
+        "SELECT activity_date FROM user_activity WHERE user_id = ? ORDER BY activity_date DESC",
+        (user_id,)
+    )
+    activity_dates = [datetime.strptime(row[0], '%Y-%m-%d').date() for row in cursor.fetchall()]
+    
+    conn.close()
+    
+    # If no activity, streak is 0
+    if not activity_dates:
+        return {'streak': 0, 'streak_at_risk': False}
+    
+    # Calculate streak
+    streak = 0
+    streak_at_risk = False
+    
+    # If user has activity today, start counting from today
+    if has_activity_today:
+        streak = 1
+        date_to_check = yesterday
+    # If user has activity yesterday but not today, start counting from yesterday
+    # and mark streak as at risk
+    elif has_activity_yesterday:
+        streak = 1
+        date_to_check = two_days_ago
+        streak_at_risk = True
+    # If user has activity two days ago but not yesterday or today,
+    # streak is 0 (streak was broken)
+    else:
+        return {'streak': 0, 'streak_at_risk': False}
+    
+    # Continue counting streak from previous days
+    for date in activity_dates:
+        if date == today or date == yesterday:
+            # Skip today and yesterday as they were already counted
+            continue
+            
+        if date == date_to_check:
+            streak += 1
+            date_to_check = date_to_check - timedelta(days=1)
+        else:
+            # Allow for one missed day in the streak
+            if date == date_to_check - timedelta(days=1) and not streak_at_risk:
+                streak_at_risk = True
+                date_to_check = date - timedelta(days=1)
+            else:
+                # Streak is broken
+                break
+    
+    return {'streak': streak, 'streak_at_risk': streak_at_risk}
 
 @app.route('/get-profile-picture', methods=['GET'])
 @login_required
@@ -2104,28 +2493,18 @@ def get_profile_picture():
         return jsonify({'error': 'User not authenticated'}), 401
     
     try:
-        # Get user data from Firestore
-        database = get_db()
-        user = database.get_user_by_id(user_id)
+        # Get user data
+        conn = sqlite3.connect('user_database.db')
+        cursor = conn.cursor()
+        cursor.execute("SELECT profile_picture_url FROM users WHERE id = ?", (user_id,))
+        result = cursor.fetchone()
+        conn.close()
         
-        profile_picture_url = None
-        if user:
-            # Check for profile picture URL in user data
-            # The index might vary depending on the adapter implementation
-            for i, field in enumerate(user):
-                if isinstance(field, str) and field.startswith('http') and ('profile' in field.lower() or 'avatar' in field.lower()):
-                    profile_picture_url = field
-                    break
-            
-            # If not found by field name, try a common index position
-            if not profile_picture_url and len(user) > 8:
-                profile_picture_url = user[8]  # Adjust this index based on your schema
-        
-        if profile_picture_url:
+        if result and result[0]:
             # Return profile picture URL if found
             return jsonify({
                 'success': True,
-                'profile_picture_url': profile_picture_url
+                'profile_picture_url': result[0]
             })
         else:
             # No profile picture found
@@ -2137,7 +2516,87 @@ def get_profile_picture():
         print(f"Error getting profile picture: {str(e)}")
         return jsonify({'error': f'Error getting profile picture: {str(e)}'}), 500
 
-# This route is already defined above
+@app.route('/student/delete-pdf', methods=['POST'])
+@login_required
+def delete_pdf():
+    """Delete a PDF created by the user."""
+    data = request.json
+    pdf_id = data.get('pdf_id')
+    user_id = session.get('user_id')
+    
+    if not pdf_id:
+        return jsonify({'error': 'Missing PDF ID'}), 400
+    
+    try:
+        conn = sqlite3.connect('user_database.db')
+        cursor = conn.cursor()
+        
+        # First check if it's in the generated_pdfs table
+        cursor.execute(
+            "SELECT pdf_path FROM generated_pdfs WHERE id = ? AND user_id = ?", 
+            (pdf_id, user_id)
+        )
+        
+        result = cursor.fetchone()
+        
+        if result:
+            # It's in the new system
+            pdf_path = result[0]
+            
+            # Delete the physical file
+            file_path = os.path.join('static', pdf_path)
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            
+            # Delete the database record
+            cursor.execute(
+                "DELETE FROM generated_pdfs WHERE id = ? AND user_id = ?", 
+                (pdf_id, user_id)
+            )
+            
+            conn.commit()
+            conn.close()
+            
+            return jsonify({'success': True})
+        else:
+            # Check if it's in the legacy system
+            cursor.execute(
+                "SELECT filename FROM latex_pdfs WHERE id = ? AND user_id = ?", 
+                (pdf_id, user_id)
+            )
+            
+            result = cursor.fetchone()
+            
+            if result:
+                # It's in the old system
+                filename = result[0]
+                
+                # Delete the physical files (both .tex and .pdf)
+                tex_path = os.path.join('temp_latex', filename)
+                pdf_path = tex_path.replace('.tex', '.pdf')
+                
+                if os.path.exists(tex_path):
+                    os.remove(tex_path)
+                if os.path.exists(pdf_path):
+                    os.remove(pdf_path)
+                
+                # Delete the database record
+                cursor.execute(
+                    "DELETE FROM latex_pdfs WHERE id = ? AND user_id = ?", 
+                    (pdf_id, user_id)
+                )
+                
+                conn.commit()
+                conn.close()
+                
+                return jsonify({'success': True})
+            
+            # If we get here, the PDF wasn't found
+            conn.close()
+            return jsonify({'error': 'PDF not found or unauthorized'}), 404
+            
+    except Exception as e:
+        return jsonify({'error': f'Error deleting PDF: {str(e)}'}), 500
 
 # Function to generate streaming response for global chat
 def generate_global_chat_stream(question, conversation_history):
