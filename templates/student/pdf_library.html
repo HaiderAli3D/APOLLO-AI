@@ -27,7 +27,7 @@
             
             {% if pdfs %}
                 <div class="pdf-grid">
-                    {% for pdf_id, topic_code, title, created_at, pdf_path in pdfs %}
+                    {% for pdf_id, topic_code, title, created_at, pdf_path, storage_url, storage_path in pdfs %}
                         <div class="pdf-card">
                             <div class="pdf-card-icon">
                                 <i class="fas fa-file-pdf"></i>
@@ -37,9 +37,15 @@
                                 <p class="pdf-card-topic">Topic: {{ topic_code }}</p>
                                 <p class="pdf-card-date">Created: {{ created_at }}</p>
                                 <div class="pdf-card-actions">
-                                    <a href="{{ url_for('static', filename=pdf_path) }}" target="_blank" class="btn btn-primary">
-                                        <i class="fas fa-eye"></i> View PDF
-                                    </a>
+                                    {% if storage_url %}
+                                        <a href="{{ storage_url }}" target="_blank" class="btn btn-primary">
+                                            <i class="fas fa-eye"></i> View PDF
+                                        </a>
+                                    {% else %}
+                                        <a href="{{ url_for('static', filename=pdf_path) }}" target="_blank" class="btn btn-primary">
+                                            <i class="fas fa-eye"></i> View PDF
+                                        </a>
+                                    {% endif %}
                                     <button class="btn btn-danger delete-pdf-btn" data-pdf-id="{{ pdf_id }}" data-path="{{ pdf_path }}">
                                         <i class="fas fa-trash"></i> Delete
                                     </button>

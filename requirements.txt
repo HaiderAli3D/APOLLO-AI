@@ -8,3 +8,6 @@ rich
 pyrebase
 firebase-admin
 werkzeug
+google-cloud-firestore>=2.0.0
+colorama
+prettytable
