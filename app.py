@@ -125,7 +125,8 @@ load_dotenv()
 
 # Initialize Firebase Admin SDK
 try:
-    cred = credentials.Certificate("apollo-auth-753b5-firebase-adminsdk-fbsvc-6b6d2904d5.json")
+    cred_file = os.getenv("FIREBASE_CREDENTIAL_FILE", "apollo-auth-753b5-firebase-adminsdk-fbsvc-6b6d2904d5.json")
+    cred = credentials.Certificate(cred_file)
     firebase_admin.initialize_app(cred)
     print("Firebase Admin SDK initialized successfully")
 except Exception as e:
@@ -133,13 +134,13 @@ except Exception as e:
 
 # Initialize Firebase client for frontend operations
 firebase_config = {
-    "apiKey": "AIzaSyBVLWsgEgQxBKDpQ4a7nb-CKhMf-ZEwnmA",
-    "authDomain": "apollo-auth-753b5.firebaseapp.com",
-    "projectId": "apollo-auth-753b5",
-    "storageBucket": "apollo-auth-753b5.firebasestorage.app",
-    "messagingSenderId": "233177806452",
-    "appId": "1:233177806452:web:189d47b01c3de6e8110321",
-    "measurementId": "G-DJXDJWE6PJ",
+    "apiKey": os.getenv("FIREBASE_API_KEY"),
+    "authDomain": os.getenv("FIREBASE_AUTH_DOMAIN"),
+    "projectId": os.getenv("FIREBASE_PROJECT_ID"),
+    "storageBucket": os.getenv("FIREBASE_STORAGE_BUCKET"),
+    "messagingSenderId": os.getenv("FIREBASE_MESSAGING_SENDER_ID"),
+    "appId": os.getenv("FIREBASE_APP_ID"),
+    "measurementId": os.getenv("FIREBASE_MEASUREMENT_ID"),
     "databaseURL": ""  # Add if you're using Realtime Database
 }
 

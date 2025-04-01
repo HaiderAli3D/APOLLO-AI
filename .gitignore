@@ -10,6 +10,9 @@ temp_uploads/
 # Firebase service account key (contains sensitive credentials)
 apollo-auth-753b5-firebase-adminsdk-fbsvc-6b6d2904d5.json
 *-firebase-adminsdk-*.json
+*firebase*config*.js
+*firebase*config*.json
+*serviceAccount*.json
 
 # Generated content
 static/generated_pdfs/
@@ -23,3 +26,11 @@ temp_latex/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Logs that might contain sensitive information
+*.log
+logs/
+
+# Local configuration files
+config.local.js
+config.local.json

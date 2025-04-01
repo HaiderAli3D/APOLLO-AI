@@ -20,8 +20,9 @@ def _get_bucket():
     """Get or initialize the Firebase Storage bucket."""
     global _bucket
     if _bucket is None:
-        # Specify the bucket name explicitly
-        _bucket = storage.bucket('apollo-auth-753b5.firebasestorage.app')
+        # Get bucket name from environment variable or use default as fallback
+        bucket_name = os.getenv("FIREBASE_STORAGE_BUCKET", "apollo-auth-753b5.firebasestorage.app")
+        _bucket = storage.bucket(bucket_name)
     return _bucket
 
 def upload_pdf(local_pdf_path, user_id, pdf_filename):
