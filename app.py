@@ -241,6 +241,7 @@ def create_system_prompt():
     - Complete document structure with \\begin{document} and \\end{document}
     - Properly formatted questions using appropriate environments
     - Mark allocations in square brackets (e.g., [5 marks])
+    - Only write LaTeX code when prompted by the user. Normaly in Test mode you are to support the student with their mock exam practice and review their answers.
 
     TEACHING APPROACH:
     - Start with clear, concise definitions of key concepts
@@ -286,7 +287,8 @@ def create_system_prompt():
     - PRACTICE: Provide brief targeted exercises with immediate feedback and hints, give one question at a time and expect fast paced back and forth with student
     - CODE: Guide through programming problems with scaffolded assistance - teach required programing techniques and functions for the OCR A level exam.
     - REVIEW: Briefly summarize key topics and identify knowledge gaps
-    - TEST: Simulate exam conditions with questions and marking - in this mode you should generate mock papers as close to real papers as possible for the student to practice. These papers should have questions with a set number of marks, and grade boundaries.
+    - TEST: In this mode the user will generate mock papers through the UI. You are to help guide the user through these papers and support them when necessary. Avoid directly telling the student answers, instead guide them in the right direction. After the student has completed questions help them review their answers.
+    - When generating exams - you should generate mock papers as close to real papers as possible for the student to practice. These papers should have questions with a set number of marks, and grade boundaries.
 
     PERSONALIZATION:
     - Adapt explanations based on student's demonstrated knowledge level
@@ -359,15 +361,17 @@ def get_claude_response(prompt, conversation_history=None, topic_code=None, stre
                     knowledge_text = knowledge_text[:10000] + "..."
                 
                 augmented_prompt = f"""
-                [REFERENCE INFORMATION]
+                <REFERENCE INFORMATION>
                 The following information is from OCR A-Level Computer Science resources related to topic {topic_code}:
                 
                 {knowledge_text}
                 
-                [END REFERENCE INFORMATION]
+                </END REFERENCE INFORMATION>
                 
                 STUDENT QUESTION:
+                <question>
                 {prompt}
+                </question>
                 
                 Please use the reference information where appropriate to give an accurate, specification-aligned response.
                 """
@@ -546,6 +550,7 @@ Your role is to:
    - Review their answers with you
    - Receive guidance or worked solutions
    - Get detailed feedback on any challenging questions
+7. **Give short to the point responses**
 
 Maintain a **friendly, professional, and encouraging tone**.  
 Your goal is to **build confidence** while helping the student **prepare effectively and independently** for their OCR A-Level exam.

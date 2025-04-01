@@ -16,6 +16,11 @@ const examForm = document.getElementById('exam-form');
 
 // Initialize chat when page loads
 window.addEventListener('DOMContentLoaded', () => {
+    // Create a hidden container for LaTeX code
+    hiddenLatexContainer = document.createElement('div');
+    hiddenLatexContainer.classList.add('hidden-latex-container');
+    document.body.appendChild(hiddenLatexContainer);
+    
     // Check if we have a session ID for this topic already
     const topicSessionKey = `session_${topicCode}`;
     const savedSessionId = localStorage.getItem(topicSessionKey);
@@ -296,131 +301,30 @@ modeBtns.forEach(btn => {
                 generatePdfBtn.style.display = 'none';
             }
             
-            // Create a mode change prompt (which won't be shown to the user)
-            const now = new Date();
-            const timeString = now.toLocaleTimeString();
-            const modePrompt = `I'd like to ${currentMode} ${topicTitle}.\n\n[CONTEXT: Topic ${topicCode} ${topicTitle} | ${timeString}]`;
+            // Clear UI
+            chatMessages.innerHTML = '';
             
-            // Add to conversation history but don't display in UI
-            conversationHistory.push({
-                role: "user",
-                content: modePrompt
-            });
+            // Reset conversation history
+            conversationHistory = [];
             
-            // Create message div for assistant
-            const messageDiv = document.createElement('div');
-            messageDiv.classList.add('message', 'assistant');
-            chatMessages.appendChild(messageDiv);
+            // If we have a session ID in the database, clear messages there too
+            if (sessionDBId) {
+                fetch('/student/clear-chat-history', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        session_id: sessionDBId
+                    })
+                }).catch(error => {
+                    console.error('Error clearing chat history:', error);
+                });
+            }
             
-            // Display "thinking..." message initially
-            messageDiv.innerHTML = "<em>Thinking...</em>";
-            
-            // Add unique request ID to track this specific request
-            const requestId = Date.now().toString();
-            
-            // Send the mode change request
-            fetch('/student/chat', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    question: modePrompt,
-                    topic_code: topicCode,
-                    mode: currentMode,
-                    stream: true,
-                    request_id: requestId,
-                    session_id: sessionDBId
-                })
-            })
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error('Network response was not ok');
-                }
-                return response.json();
-            })
-            .then(data => {
-                if (data.error) {
-                    messageDiv.remove();
-                    addMessage('system', `Error: ${data.error}`);
-                    return;
-                }
-                
-                // Set up streaming with the unique request ID
-                let fullResponse = '';
-                
-                // Connect to the SSE endpoint with request ID
-                const source = new EventSource(`/student/chat?request_id=${requestId}`);
-                
-                source.onmessage = function(event) {
-                    try {
-                        const data = JSON.parse(event.data);
-                        
-                        if (data.connected) {
-                            // Just a connection confirmation, ignore
-                            return;
-                        }
-                        
-                        if (data.done) {
-                            source.close();
-                            
-                            // If we have full_response, use it
-                            if (data.full_response) {
-                                fullResponse = data.full_response;
-                                messageDiv.innerHTML = parseMarkdown(fullResponse);
-                            }
-                            
-                            // Add the assistant's response to conversation history
-                            conversationHistory.push({
-                                role: "assistant",
-                                content: fullResponse
-                            });
-                            
-                            // If we have a session ID in the database, save the response there too
-                            if (sessionDBId) {
-                                fetch('/student/save-response', {
-                                    method: 'POST',
-                                    headers: {
-                                        'Content-Type': 'application/json'
-                                    },
-                                    body: JSON.stringify({
-                                        session_id: sessionDBId,
-                                        response: fullResponse
-                                    })
-                                }).catch(error => {
-                                    console.error('Error saving response to database:', error);
-                                });
-                            }
-                            
-                            return;
-                        }
-                        
-                        if (data.text) {
-                            fullResponse += data.text;
-                            messageDiv.innerHTML = parseMarkdown(fullResponse);
-                            chatMessages.scrollTop = chatMessages.scrollHeight;
-                        }
-                    } catch (error) {
-                        console.error('Error parsing SSE message:', error, event.data);
-                    }
-                };
-                
-                source.onerror = function(error) {
-                    console.error('EventSource error:', error);
-                    source.close();
-                    
-                    if (fullResponse === '') {
-                        messageDiv.remove();
-                        addMessage('system', 'Error: Failed to get a response. Please try again.');
-                    }
-                };
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                messageDiv.remove();
-                addMessage('system', `Error: ${error.message}`);
-                chatMessages.scrollTop = chatMessages.scrollHeight;
-            });
+            // Use the same function as refresh chat to ensure consistent behavior
+            // This will call the '/student/initial-prompt' endpoint with proper mode context
+            sendInitialPrompt();
         }
     });
 });
@@ -452,28 +356,8 @@ document.getElementById('generate-pdf-btn').addEventListener('click', generatePD
 // Create a hidden container for LaTeX code
 let hiddenLatexContainer;
 
-// Add the hidden container when the page loads
-window.addEventListener('DOMContentLoaded', () => {
-    hiddenLatexContainer = document.createElement('div');
-    hiddenLatexContainer.classList.add('hidden-latex-container');
-    document.body.appendChild(hiddenLatexContainer);
-    
-    // Rest of the existing DOMContentLoaded code...
-    // Check if we have a session ID for this topic already
-    const topicSessionKey = `session_${topicCode}`;
-    const savedSessionId = localStorage.getItem(topicSessionKey);
-    
-    if (savedSessionId) {
-        // We have an existing session, try to load it
-        sessionDBId = savedSessionId;
-        console.log("Found existing session ID:", sessionDBId);
-        loadRecentMessages();
-    } else {
-        // No existing session, start a new one
-        console.log("No existing session found, starting fresh");
-        sendInitialPrompt();
-    }
-});
+// The DOMContentLoaded event listener has been consolidated with the one above
+// to prevent loading messages twice.
 
 function generatePDF() {
     // Show loading state on the button
