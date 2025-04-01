@@ -24,29 +24,7 @@
         </nav>
     </header>
     
-    <div class="page-with-pdf-and-chat notes-docked">
-        <!-- PDF Viewer Sidebar -->
-        <div id="pdf-sidebar" class="pdf-sidebar docked">
-            <div class="pdf-header">
-                <h3>APOLLO AI Notes</h3>
-                <button id="pdf-dock-toggle" class="pdf-dock-toggle" aria-label="Toggle PDF sidebar">
-                    <i class="fas fa-chevron-right"></i>
-                </button>
-            </div>
-            <div id="pdf-filename" class="pdf-filename">Loading...</div>
-            <div id="pdf-status" class="pdf-status"></div>
-            <div id="pdf-container" class="pdf-container">
-                <div class="pdf-canvas-container">
-                    <canvas id="pdf-canvas"></canvas>
-                </div>
-            </div>
-            <div class="pdf-controls">
-                <button id="prev-page" class="btn btn-secondary">&lt;</button>
-                <input type="number" id="page-num" value="1" min="1">
-                <span>/ <span id="page-count">0</span></span>
-                <button id="next-page" class="btn btn-secondary">&gt;</button>
-            </div>
-        </div>
+    <div class="page-with-chat">
         <div class="main-content">
             <main class="learning-container">
                 <aside class="topic-sidebar">
@@ -180,7 +158,5 @@
     </script>
     <script src="{{ url_for('static', filename='js/chat.js') }}"></script>
     <script src="{{ url_for('static', filename='js/global-chat.js') }}"></script>
-    <script src="{{ url_for('static', filename='js/pdf-viewer.js') }}"></script>
-    <script src="{{ url_for('static', filename='js/debug.js') }}"></script>
 </body>
 </html>

@@ -1530,21 +1530,50 @@ def student_progress():
     try:
         # Try to filter by user_id
         topic_progress = database.get_topic_progress(user_id=user_id)
-        exam_progress = database.get_exam_progress(user_id=user_id)
+        raw_exam_progress = database.get_exam_progress(user_id=user_id)
     except TypeError as e:
         # Fallback if we get TypeError (when function doesn't accept user_id parameter)
         print(f"Warning: Database function doesn't accept user_id parameter: {e}")
         # Fallback to unfiltered data
         topic_progress = database.get_topic_progress()
-        exam_progress = database.get_exam_progress()
+        raw_exam_progress = database.get_exam_progress()
     except Exception as e:
         # Re-raise if it's some other error
         print(f"Error in student_progress: {e}")
         raise
     
+    # Process the raw exam progress data to match the format expected by the template
+    # The template expects (topic_code, avg_max, avg_score, avg_percent) tuples
+    # but get_exam_progress returns (topic_code, question_type, difficulty, score, max_score, percentage, created_at)
+    
+    # Group exam results by topic_code
+    topic_exams = {}
+    for exam in raw_exam_progress:
+        topic_code = exam[0]  # Index 0 is topic_code
+        score = exam[3]       # Index 3 is score
+        max_score = exam[4]   # Index 4 is max_score
+        
+        if topic_code not in topic_exams:
+            topic_exams[topic_code] = []
+            
+        topic_exams[topic_code].append((score, max_score))
+    
+    # Calculate averages for each topic
+    processed_exam_progress = []
+    for topic_code, exams in topic_exams.items():
+        total_score = sum(exam[0] for exam in exams)
+        total_max = sum(exam[1] for exam in exams)
+        
+        # Calculate averages
+        avg_score = total_score / len(exams) if exams else 0
+        avg_max = total_max / len(exams) if exams else 0
+        avg_percent = (total_score / total_max * 100) if total_max > 0 else 0
+        
+        processed_exam_progress.append((topic_code, avg_max, avg_score, avg_percent))
+    
     return render_template('student/progress.html', 
                           topic_progress=topic_progress,
-                          exam_progress=exam_progress,
+                          exam_progress=processed_exam_progress,
                           user_name=session.get('user_name'))
 
 @app.route('/student/rate-topic', methods=['POST'])
