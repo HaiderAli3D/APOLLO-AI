@@ -56,8 +56,8 @@ class FirestoreDBWrapper:
     def start_session(self, context_info, user_id=None):
         return start_session(context_info, user_id)
     
-    def add_message(self, session_id, role, content):
-        return add_message(session_id, role, content)
+    def add_message(self, session_id, role, content, should_display=True):
+        return add_message(session_id, role, content, should_display)
     
     def get_session_messages(self, session_id):
         return get_session_messages(session_id)
@@ -431,10 +431,18 @@ def start_session(context_info: List[str], user_id: str = None) -> str:
     
     return session_id
 
-def add_message(session_id: str, role: str, content: str) -> bool:
+def add_message(session_id: str, role: str, content: str, should_display: bool = True) -> bool:
     """
     Add a message to a session in Firestore.
-    Returns True if the message was added successfully.
+    
+    Args:
+        session_id: The ID of the session to add the message to
+        role: The role of the message sender ('user', 'assistant', or 'system')
+        content: The content of the message
+        should_display: Whether this message should be displayed in the UI (default: True)
+        
+    Returns:
+        True if the message was added successfully.
     """
     db = get_db()
     
@@ -449,15 +457,16 @@ def add_message(session_id: str, role: str, content: str) -> bool:
     message_ref.set({
         'role': role,
         'content': content,
-        'timestamp': datetime.now().isoformat()
+        'timestamp': datetime.now().isoformat(),
+        'should_display': should_display
     })
     
     return True
 
-def get_session_messages(session_id: str) -> List[Tuple[str, str, str]]:
+def get_session_messages(session_id: str) -> List[Tuple[str, str, str, bool]]:
     """
     Get all messages for a session from Firestore.
-    Returns a list of (id, role, content) tuples for backward compatibility.
+    Returns a list of (id, role, content, should_display) tuples.
     """
     db = get_db()
     
@@ -467,7 +476,31 @@ def get_session_messages(session_id: str) -> List[Tuple[str, str, str]]:
     result = []
     for msg in messages:
         msg_data = msg.to_dict()
-        result.append((msg.id, msg_data.get('role'), msg_data.get('content')))
+        role = msg_data.get('role')
+        content = msg_data.get('content', '')
+        
+        # Get the should_display flag, default to True for backward compatibility
+        should_display = msg_data.get('should_display', True)
+        
+        # Additional check for system prompts sent as user messages
+        # These are the auto-generated prompts that should never be displayed
+        if role == 'user' and (
+            # Common patterns in system-generated initial prompts
+            'You are now teaching the user about' in content or
+            'You are now helping the user practice' in content or
+            'You are now assisting the student in **TEST mode**' in content or
+            'Please provide an explanation that:' in content or
+            # The prompt has contextual markers added by the system
+            ('[CONTEXT:' in content and '[MODE:' in content)
+        ):
+            should_display = False
+        
+        result.append((
+            msg.id, 
+            role, 
+            content,
+            should_display
+        ))
     
     return result
 

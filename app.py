@@ -345,6 +345,12 @@ def get_claude_response(prompt, conversation_history=None, topic_code=None, stre
         
         messages = []
         
+        print("#############################")
+        print("Initial Prompt:")
+        print(prompt)
+        print("###########################")
+
+        
         # Include conversation history if provided
         if conversation_history:
             messages = conversation_history.copy()
@@ -357,8 +363,8 @@ def get_claude_response(prompt, conversation_history=None, topic_code=None, stre
             if knowledge:
                 # Summarize knowledge to avoid exceeding context limits
                 knowledge_text = "\n\n".join(knowledge)
-                if len(knowledge_text) > 10000:  # Limit knowledge text size
-                    knowledge_text = knowledge_text[:10000] + "..."
+                if len(knowledge_text) > 20000:  # Limit knowledge text size
+                    knowledge_text = knowledge_text[:20000] + "..."
                 
                 augmented_prompt = f"""
                 <REFERENCE INFORMATION>
@@ -378,6 +384,11 @@ def get_claude_response(prompt, conversation_history=None, topic_code=None, stre
         
         # Append mode tag to the prompt
         augmented_prompt = f"{augmented_prompt}\n\n[MODE: {mode}]"
+        
+        print("#############################")
+        print("augmented prompt Prompt:")
+        print(augmented_prompt)
+        print("###########################")
         
         # Add the current prompt
         messages.append({"role": "user", "content": augmented_prompt})
@@ -1246,29 +1257,38 @@ def student_initial_prompt():
         if not api_key:
             return jsonify({'error': 'ANTHROPIC_API_KEY is not set. Please set it in the environment variables.'}), 500
         
-        # Start a new session in the database
+        # Check if we already have a session ID for this topic
+        existing_session_id = session.get('db_session_id')
+        
+        # Get database
         database = get_db()
-        try:
-            # Try to use the version with user_id
-            session_id = database.start_session([component, main_topic, detailed_topic], user_id=user_id)
-        except TypeError:
-            # Fall back to original function if user_id parameter doesn't exist
-            session_id = database.start_session([component, main_topic, detailed_topic])
+        
+        # If we don't have a session ID, create a new session
+        if not existing_session_id:
+            try:
+                # Try to use the version with user_id
+                session_id = database.start_session([component, main_topic, detailed_topic], user_id=user_id)
+            except TypeError:
+                # Fall back to original function if user_id parameter doesn't exist
+                session_id = database.start_session([component, main_topic, detailed_topic])
+                
+                # Add monkey patching for basic OCRCSDatabase class to support user verification
+                if not hasattr(database, 'verify_session_ownership'):
+                    def verify_session_ownership(self, session_id, user_id):
+                        """Check if a session belongs to a user - basic implementation always returns True."""
+                        return True
+                    database.verify_session_ownership = verify_session_ownership.__get__(database)
             
-            # Add monkey patching for basic OCRCSDatabase class to support user verification
-            if not hasattr(database, 'verify_session_ownership'):
-                def verify_session_ownership(self, session_id, user_id):
-                    """Check if a session belongs to a user - basic implementation always returns True."""
-                    return True
-                database.verify_session_ownership = verify_session_ownership.__get__(database)
+            # Store session ID in Flask session
+            session['db_session_id'] = session_id
+            session['current_topic'] = main_topic
+            session['current_detailed_topic'] = detailed_topic
+        else:
+            # Use the existing session ID
+            session_id = existing_session_id
         
-        # Store session ID in Flask session
-        session['db_session_id'] = session_id
-        session['current_topic'] = main_topic
-        session['current_detailed_topic'] = detailed_topic
-        
-        # Add user message to database
-        database.add_message(session_id, "user", initial_prompt)
+        # Add user message to database (marked as non-displayable since it's a system/initial prompt)
+        database.add_message(session_id, "user", initial_prompt, should_display=False)
         
         # If streaming is requested, use the same pattern as student_chat
         if stream_mode and request_id:
@@ -1289,10 +1309,14 @@ def student_initial_prompt():
             # Non-streaming response (original functionality)
             response = get_claude_response(initial_prompt, topic_code=topic_code, mode=mode)
             
-            # Add assistant message to database
-            database.add_message(session_id, "assistant", response)
-            
-            return jsonify({'response': response})
+        # Check if this contains LaTeX code markers
+        is_latex = '\\documentclass' in response or '\\begin{document}' in response
+        
+        # Save response to database, marking only LaTeX content as not displayable
+        # Regular test mode conversation should still display
+        database.add_message(session_id, "assistant", response, should_display=not is_latex)
+        
+        return jsonify({'response': response})
     except Exception as e:
         print(f"Error in student_initial_prompt: {str(e)}")
         return jsonify({'error': f'Error generating initial response: {str(e)}'}), 500
@@ -1406,7 +1430,7 @@ def student_chat():
             # Verify this session belongs to the current user
             if database.verify_session_ownership(session_id, user_id):
                 messages = database.get_session_messages(session_id)
-                for _, role, content in messages:
+                for _, role, content, _ in messages:  # Unpack 4 items, ignoring the should_display flag
                     conversation_history.append({"role": role, "content": content})
             else:
                 return jsonify({'error': 'Session not found or unauthorized'}), 403
@@ -1596,6 +1620,7 @@ def save_response():
     session_id = data.get('session_id')
     response = data.get('response')
     user_id = session.get('user_id')
+    mode = data.get('mode', 'explore')
     
     if not session_id or not response:
         return jsonify({'error': 'Missing required fields'}), 400
@@ -1605,8 +1630,12 @@ def save_response():
     
     # Verify this session belongs to the current user
     if database.verify_session_ownership(session_id, user_id):
-        # Save response to database
-        database.add_message(session_id, "assistant", response)
+        # Check only for LaTeX code markers - we want to show the TEST mode welcome message
+        is_latex = '\\documentclass' in response or '\\begin{document}' in response
+        
+        # Add assistant message to database, marking only LaTeX content as not displayable
+        # TEST mode welcome/introduction messages should be displayed
+        database.add_message(session_id, "assistant", response, should_display=not is_latex)
         return jsonify({'success': True})
     else:
         return jsonify({'error': 'Session not found or unauthorized'}), 403
@@ -1640,11 +1669,13 @@ def get_recent_messages():
             
             # Format messages for frontend
             formatted_messages = []
-            for _, role, content in messages:
-                formatted_messages.append({
-                    "role": role,
-                    "content": content
-                })
+            for _, role, content, should_display in messages:
+                # Only include messages that should be displayed
+                if should_display:
+                    formatted_messages.append({
+                        "role": role,
+                        "content": content
+                    })
             
             return jsonify({
                 'success': True,
